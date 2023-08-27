@@ -58,16 +58,14 @@ for image_name,date_time in zip(image_names[:],date_times[:]):
     #Find what indexes are target vs.field sources indexes
     target_index = np.where(separations.value < 20.0 / 3600.0) # Any source within a beam major axis of the source coordinates is recorded as the target
 
-    #############################################################
-    # Find the Field sources, enforcing point-source conditions #
-    #  Condition 1: Peak flux within 25% of the  island_flux    #
-    #  Condition 2: Source shape within 25% of the beam shape   #
-    #  Condition 3: It is not the target source                 #
-    #############################################################
+    #######################################################################
+    # Find the Field sources, enforcing point-source conditions           #
+    #  Condition 1: (Default) Peak flux within 25% of the  island_flux    #
+    #  Condition 2: (Default) Source shape within 25% of the beam shape   #
+    #  Condition 3: It is not the target source                           #
+    #######################################################################
     
-    threshold = 0.25
-
-    field_index = np.where((abs(peak_flux/island_flux - 1.0) < threshold) & (abs(major/bmaj - 1.0) < threshold) & (abs(minor/bmin - 1.0) < threshold))[0] 
+    field_index = np.where((abs(peak_flux/island_flux - 1.0) < flux_threshold) & (abs(major/bmaj - 1.0) < size_threshold) & (abs(minor/bmin - 1.0) < size_threshold))[0] 
     field_index = np.setdiff1d(field_index,target_index) # Remove target from the field index
 
     #Fill target dictionary
