@@ -1,6 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
-import json, os, glob, configparser, sys
+import json, glob, configparser
 from astropy.io import fits
 from astropy import units as u
 from astropy.coordinates import SkyCoord,match_coordinates_sky
