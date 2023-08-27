@@ -9,11 +9,12 @@ from astropy.coordinates import SkyCoord,match_coordinates_sky
 cfg = configparser.ConfigParser()
 cfg.read('../scripts/config.ini')
 
+
+
 # Load date-time array
 date_times = np.load('../files/date-times.npy')
 
-# Chose a reference epoch index, here I'm using the most recent image, change as you wish
-ref_index = len(date_times) - 1
+# Use first epoch as reference
 ref_index = 0
 
 with open('../files/fieldsources_{}_{}.json'.format(date_times[ref_index],cfg['SOURCE']['name']), 'r') as jfile:
@@ -108,8 +109,8 @@ for epoch_index, epoch in zip(epoch_indexes[:], epochs[:]):
     offsets = offsets[inds]
     epoch_catalog = epoch_catalog[inds,:]
 
-    # Check for matches that are within 5.0 arcseconds and append them to the catalog
-    good_matches = np.where(offsets < 5.0)
+    # Check for matches that are within the match threshold (default is 5 arcseconds)
+    good_matches = np.where(offsets < match_threshold)
     catalog[sources[good_matches],epoch_index, :] = epoch_catalog[good_matches,:]
 
 #############################
