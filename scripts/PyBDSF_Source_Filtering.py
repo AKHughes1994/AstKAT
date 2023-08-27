@@ -7,20 +7,20 @@ from astropy.io import fits
 from astropy import units as u
 from astropy.coordinates import SkyCoord,match_coordinates_sky
 
-#Read in the configuration file
+# Read in the configuration file
 cfg = configparser.ConfigParser()
 cfg.read('config.ini')
 
 sourceCoords = SkyCoord(cfg['POSITIONS']['source_ra'],cfg['POSITIONS']['source_dec'], frame='icrs')
 
-#Load date-time array
+# Load date-time array
 date_times = np.load('../files/date-times.npy')
 image_names = np.load('../files/image-names.npy')
 beamsizes  = []
 
-#Iterate through the files -- separating target and field sources
+# Iterate through the files -- separating target and field sources
 for image_name,date_time in zip(image_names[:],date_times[:]):
-    #Extract the beam size
+    # Extract the beam size
     hdu = fits.open(image_name)
     header = hdu[0].header
     bmaj = header['BMAJ'] 
@@ -38,7 +38,7 @@ for image_name,date_time in zip(image_names[:],date_times[:]):
     target = {'ra' : [], 'dec': [], 'peak':[], 'rms':[], 'ra_beam':[], 'dec_beam':[]}
     field  = {'ra' : [], 'dec': [], 'peak':[], 'rms':[], 'ra_beam':[], 'dec_beam':[]}
 
-    #Extract data from FITS files
+    # Extract data from FITS files
     ras         = im[1].data['RA']
     decs        = im[1].data['DEC']
     source_flux = im[1].data['Total_flux']     # Flux of the source (Jy)
@@ -51,12 +51,12 @@ for image_name,date_time in zip(image_names[:],date_times[:]):
     ra_beams    = np.ones(len(im[1].data['RA'])) * ra_beam
     dec_beams   = np.ones(len(im[1].data['RA'])) * dec_beam
 
-    #Make SkyCoord object from coordinates
+    # Make SkyCoord object from coordinates
     allCoords = SkyCoord(ra = ras * u.deg, dec = decs * u.deg, frame='icrs')
     separations = allCoords.separation(sourceCoords)
 
-    #Find what indexes are target vs.field sources indexes
-    target_index = np.where(separations.value < 20.0 / 3600.0) # Any source within a beam major axis of the source coordinates is recorded as the target
+    # Find what indexes are target vs.field sources indexes
+    target_index = np.where(separations.arcsec < target_threshold) # Any source within a beam major axis of the source coordinates is recorded as the target
 
     #######################################################################
     # Find the Field sources, enforcing point-source conditions           #
@@ -68,19 +68,19 @@ for image_name,date_time in zip(image_names[:],date_times[:]):
     field_index = np.where((abs(peak_flux/island_flux - 1.0) < flux_threshold) & (abs(major/bmaj - 1.0) < size_threshold) & (abs(minor/bmin - 1.0) < size_threshold))[0] 
     field_index = np.setdiff1d(field_index,target_index) # Remove target from the field index
 
-    #Fill target dictionary
+    # Fill target dictionary
     target['ra'], target['dec'], target['peak'], target['rms'], target['ra_beam'], target['dec_beam'] = ras[target_index].tolist(), decs[target_index].tolist(), peak_flux[target_index].tolist(), rms_err[target_index].tolist(), ra_beams[target_index].tolist(), dec_beams[target_index].tolist()
 
-    #Fill field source dictionary
+    # Fill field source dictionary
     field['ra'], field['dec'], field['peak'], field['rms'], field['ra_beam'], field['dec_beam'] = ras[field_index].tolist(), decs[field_index].tolist(), peak_flux[field_index].tolist(), rms_err[field_index].tolist(), ra_beams[field_index].tolist(), dec_beams[field_index].tolist()
 
-    #Save the individual epoch dictionaries
+    # Save the individual epoch dictionaries
     with open('../files/fieldsources_{}_{}.json'.format(date_time,cfg['SOURCE']['name']),'w') as jfile:
         json.dump(field,jfile)
 
     with open('../files/target_{}_{}.json'.format(date_time,cfg['SOURCE']['name']),'w') as jfile:
         json.dump(target,jfile)
 
-#Save beamsizes as a text file
+# Save beamsizes as a text file
 with open('../results/beamsizes.txt', 'w') as tfile:
     np.savetxt(tfile,beamsizes)
