@@ -122,11 +122,9 @@ max_flux     = np.nanmax(catalog[:,:, 2], axis=1)
 min_flux     = np.nanmin(catalog[:,:, 2], axis=1)
 median_snr   = np.nanmedian(catalog[:,:, 4], axis=1)
 
-# Remove sources with too many np.nans (i.e., include sources that have NaN values in less than 25% of the epochs)
-# Also only include sources where the maximum and minimum values are seperated by a factor < variability limit:
-variability_limit = 2.0
-epoch_threshold   = np.amin((0.25 * len(date_times), 3))
-snr_threshold     = 4.0
+# Remove sources with too many np.nans (i.e., include sources that have NaN values in less than epoch_fraction% of the epochs also ensure a minimum number of epochs)
+# Also only include sources where the maximum and minimum values are separated by a factor < variability limit:
+epoch_threshold   = np.amin((epoch_fraction * len(date_times), epoch_min))
 
 good_sources = np.where((n_nans < epoch_threshold) & (max_flux < variability_limit * min_flux))# & (median_snr > snr_threshold))
 catalog = catalog[good_sources[0],:,:]
