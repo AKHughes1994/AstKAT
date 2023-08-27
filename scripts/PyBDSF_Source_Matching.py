@@ -131,7 +131,7 @@ median_snr   = np.nanmedian(catalog[:,:, 4], axis=1)
 # Also only include sources where the maximum and minimum values are separated by a factor < variability limit:
 epoch_threshold   = np.amin((epoch_fraction * len(date_times), epoch_min))
 
-good_sources = np.where((n_nans < epoch_threshold) & (max_flux < variability_limit * min_flux))# & (median_snr > snr_threshold))
+good_sources = np.where((n_nans < epoch_threshold) & (max_flux < variability_limit * min_flux))
 catalog = catalog[good_sources[0],:,:]
 
 ###########################################
