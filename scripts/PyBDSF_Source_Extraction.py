@@ -1,4 +1,4 @@
-import configparser, os, glob
+import configparser, glob
 from astropy.io import fits
 import bdsf #PyBDSF
 import numpy as np
