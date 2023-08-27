@@ -14,11 +14,11 @@ from utils import AppendValues, MCMC, PlotResults, stdfit, CI, NanAverage, Boots
 cfg = configparser.ConfigParser()
 cfg.read('config.ini')
 
-convergence_threshold = cfg['MCMC']['convergence_threshold']
-n_boostrap            = cfg['MCMC']['n_boostrap']
-phase_offset_limit    = cfg['MCMC']['phase_offset_limit']
-min_snr               = cfg['MCMC']['min_snr']
-max_snr               = cfg['MCMC']['max_snr']
+convergence_threshold = float(cfg['MCMC']['convergence_threshold'])
+n_boostrap            = int(cfg['MCMC']['n_boostrap']
+phase_offset_limit    = float(cfg['MCMC']['phase_offset_limit'])
+min_snr               = float(cfg['MCMC']['min_snr'])
+max_snr               = float(cfg['MCMC']['max_snr'])
 
 
 #Load in the index dictionary
