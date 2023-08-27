@@ -12,6 +12,9 @@ cfg = configparser.ConfigParser()
 cfg.read('config.ini')
 
 sourceCoords = SkyCoord(cfg['POSITIONS']['source_ra'],cfg['POSITIONS']['source_dec'], frame='icrs')
+flux_threshold   = cfg['THRESHOLDS']['flux_threshold']
+size_threshold   = cfg['THRESHOLDS']['size_threshold']
+target_threshold = cfg['THRESHOLDS']['target_threshold']
 
 # Load date-time array
 date_times = np.load('../files/date-times.npy')
