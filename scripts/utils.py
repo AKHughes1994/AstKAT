@@ -1,5 +1,5 @@
 import numpy as np
-import json, glob, os, emcee, datetime, configparser
+import json, glob, emcee, configparser
 import matplotlib.pyplot as plt
 from astropy.coordinates import SkyCoord
 import astropy.units as u
