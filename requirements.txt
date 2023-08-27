@@ -1,0 +1,2 @@
+Current version was designed for Python 3.8.10 but should be farely robust. Reuqired python packages are:
+
