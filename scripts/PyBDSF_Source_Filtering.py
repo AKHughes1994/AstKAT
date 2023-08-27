@@ -1,4 +1,4 @@
-import configparser, os, glob, json
+import configparser glob, json
 import numpy as np
 from astropy.io import fits
 from astropy import units as u
