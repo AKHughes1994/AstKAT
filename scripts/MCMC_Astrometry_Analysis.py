@@ -14,6 +14,13 @@ from utils import AppendValues, MCMC, PlotResults, stdfit, CI, NanAverage, Boots
 cfg = configparser.ConfigParser()
 cfg.read('config.ini')
 
+convergence_threshold = cfg['MCMC']['convergence_threshold']
+n_boostrap            = cfg['MCMC']['n_boostrap']
+phase_offset_limit    = cfg['MCMC']['phase_offset_limit']
+min_snr               = cfg['MCMC']['min_snr']
+max_snr               = cfg['MCMC']['max_snr']
+
+
 #Load in the index dictionary
 with open('../files/index_dict_{}.json'.format(cfg['SOURCE']['name']), 'r') as jfile:
     index_dict = json.load(jfile)
@@ -58,7 +65,7 @@ catalog, index_dict = AppendValues(catalog, index_dict, delta_Decs/dec_beams,['d
 
 # Use bootstrapping to solve for an error on astrometric variability
 global_snr, global_stdev_RAs_beams, global_stdev_RAs_beams_err, global_stdev_Decs_beams, global_stdev_Decs_beams_err = BootstrapPositions(catalog, n_bootstrap=n_bootstrap)
-filter_data  = FilterData(catalog,snr_low = 5.0, snr_high = 1e10, phase_offset_thresh = phase_offset_limit)
+filter_data  = FilterData(catalog,snr_low = min_snr, snr_high = max_snr, phase_offset_thresh = phase_offset_limit)
 snr, stdev_RAs_beams, stdev_RAs_beams_err, stdev_Decs_beams, stdev_Decs_beams_err = BootstrapPositions(filter_data, n_bootstrap=n_bootstrap)
 
 # Solve MCMC only using the filtered data
@@ -106,7 +113,7 @@ while loop:
     catalog, index_dict = AppendValues(catalog, index_dict, dec_corr_offset, ['delta_dec_beams_corr_{}'.format(iteration)])
 
     # Filter data (Optional) and calculate the averages/stds over all the epochs
-    filter_data  = FilterData(catalog, snr_low = 5.0, snr_high = 1e10, phase_offset_thresh = phase_offset_limit)
+    filter_data  = (catalog, snr_low = 5.0, snr_high = 1e10, phase_offset_thresh = phase_offset_limit)
     snr, stdev_RAs_beams, stdev_RAs_beams_err, stdev_Decs_beams, stdev_Decs_beams_err = BootstrapPositions(filter_data, n_bootstrap=n_bootstrap)
 
     # Run Newest MCMC iteration
@@ -119,8 +126,8 @@ while loop:
 
     # Here we establish a criteria for convergence, for both ra and dec the average change in the astrometric precision (on a per-source basis) 
     # has to be less that 10% of the error for three consecutive iterations 
-    threshold = 1
-    if sigma_ra < threshold and sigma_dec < threshold:
+
+    if sigma_ra < convergence_threshold and sigma_dec < convergence_threshold:
         good_iteration += 1 
         if good_iteration == 3:
             loop=False
@@ -135,7 +142,7 @@ while loop:
 print('\nConvergence Threshold Reached -- Making Final plots')
 # Get final data 
 global_snr, global_stdev_RAs_beams, global_stdev_RAs_beams_err, global_stdev_Decs_beams, global_stdev_Decs_beams_err = BootstrapPositions(catalog, n_bootstrap=n_bootstrap)
-filter_data  = FilterData(catalog,snr_low = 5.0, snr_high = 1e10, phase_offset_thresh = phase_offset_limit)
+filter_data  = FilterData(catalog,snr_low = min_snr, snr_high = max_snr, phase_offset_thresh = phase_offset_limit)
 snr, stdev_RAs_beams, stdev_RAs_beams_err, stdev_Decs_beams, stdev_Decs_beams_err = BootstrapPositions(filter_data, n_bootstrap=n_bootstrap)
 
 # Plot the results with the epoch-dependant correction
