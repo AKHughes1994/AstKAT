@@ -1,2 +1,7 @@
-Current version was designed for Python 3.8.10 but should be farely robust. Reuqired python packages are:
+Current version was designed for Python 3.8.10 but should be farely robust. Main python packages are:
 
+astropy==5.1
+emcee==3.1.2
+bdsf==1.10.2
+numpy==1.23.1
+scipy==1.9.0
