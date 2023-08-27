@@ -5,14 +5,14 @@ from astropy.io import fits
 from astropy import units as u
 from astropy.coordinates import SkyCoord,match_coordinates_sky
 
-#Read in the configuration file
+# Read in the configuration file
 cfg = configparser.ConfigParser()
 cfg.read('../scripts/config.ini')
 
-#Load date-time array
+# Load date-time array
 date_times = np.load('../files/date-times.npy')
 
-#Chose a reference epoch index, here I'm using the most recent image, change as you wish
+# Chose a reference epoch index, here I'm using the most recent image, change as you wish
 ref_index = len(date_times) - 1
 ref_index = 0
 
