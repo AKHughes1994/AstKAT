@@ -9,11 +9,11 @@ from astropy.coordinates import SkyCoord,match_coordinates_sky
 cfg = configparser.ConfigParser()
 cfg.read('../scripts/config.ini')
 
-match_threshold         = cfg['THRESHOLDS']['match_threshold']
-epoch_min               = cfg['THRESHOLDS']['epoch_min']
-epoch_threshold         = cfg['THRESHOLDS']['epoch_threshold']
-variability_threshold   = cfg['THRESHOLDS']['variability_threshold']
-snr_threshold           = cfg['THRESHOLDS']['snr_threshold']
+match_threshold         = float(cfg['THRESHOLDS']['match_threshold'])
+epoch_min               = float(cfg['THRESHOLDS']['epoch_min'])
+epoch_threshold         = float(cfg['THRESHOLDS']['epoch_threshold'])
+variability_threshold   = float(cfg['THRESHOLDS']['variability_threshold'])
+snr_threshold           = float(cfg['THRESHOLDS']['snr_threshold'])
 
 # Load date-time array
 date_times = np.load('../files/date-times.npy')
