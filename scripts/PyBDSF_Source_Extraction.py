@@ -36,7 +36,6 @@ image_names = np.array(image_names)[sorted_index]
 np.save('../files/date-times', date_times)
 np.save('../files/image-names',image_names)
 
-'''
 # Run each image through PyBDSF
 for image_name,date_time in zip(image_names,date_times): #All images
 
@@ -45,4 +44,3 @@ for image_name,date_time in zip(image_names,date_times): #All images
 
     # Save FITS catalog
     img.write_catalog(format='fits', catalog_type='srl', outfile = '../files/total_field_%s_%s.fits' %(date_time,cfg['SOURCE']['name']), clobber=True)
-'''
