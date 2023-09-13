@@ -21,7 +21,7 @@ def str_to_bool(s):
 fix_to_beam = str_to_bool(cfg['PYBDSF']['fix_to_beam'])
 
 # Extract the source name, observing times, and order according to date
-image_names = glob.glob('../images/*.fits') #get image names
+image_names = glob.glob(os.path.abspath('../images/') + '/*.fits') #get image names
 for image_name in image_names:
     hdul = fits.open(image_name) #load image
     date_times.append(hdul[0].header['DATE-OBS'])
