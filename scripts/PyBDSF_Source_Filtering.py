@@ -16,7 +16,8 @@ target_threshold = float(cfg['THRESHOLDS']['target_threshold'])
 # Load date-time array
 date_times = np.load('../files/date-times.npy')
 image_names = np.load('../files/image-names.npy')
-beamsizes  = []
+beams   = []
+beamextents = []
 
 # Iterate through the files -- separating target and field sources
 for image_name,date_time in zip(image_names[:],date_times[:]):
@@ -30,8 +31,9 @@ for image_name,date_time in zip(image_names[:],date_times[:]):
     # Angular extents along x (RA) and y (Dec) directions equivalent to the FWHM projected on x and y plane
     dec_beam = 2.0 * np.sqrt((bmaj * 0.5) ** 2 * np.cos(bpa) ** 2  + (bmin * 0.5) ** 2 * np.sin(bpa) ** 2)
     ra_beam  = 2.0 * np.sqrt((bmaj * 0.5) ** 2 * np.sin(bpa) ** 2  + (bmin * 0.5) ** 2 * np.cos(bpa) ** 2)
-    beamsizes.append([ra_beam * 3600. ,dec_beam * 3600.]) # For saving a text file
-
+    beamextents.append([ra_beam * 3600. ,dec_beam * 3600.]) # For saving a text file
+    beams.append([bmaj * 3600.0, bmin * 3600., bpa]) # For saving a text file
+    
     print('Filtering: ',date_time)
     fname = glob.glob('../files/total_field*{}*.fits'.format(date_time))[0] #get filename
     im = fits.open(fname)
@@ -81,7 +83,12 @@ for image_name,date_time in zip(image_names[:],date_times[:]):
     with open('../files/target_{}_{}.json'.format(date_time,cfg['SOURCE']['name']),'w') as jfile:
         json.dump(target,jfile)
 
-# Save beamsizes as a text file
-with open('../results/beamsizes.txt', 'w') as tfile:
-    np.savetxt(tfile,beamsizes)
+#Save beamsizes as a text file
+with open('../results/beams.txt', 'w') as tfile:
+    np.savetxt(tfile,beams,header='BMAJ (arcsec), BMIN (arcsec), BPA (deg)')
+
+#Save beamsizes as a text file
+with open('../results/beamextents.txt', 'w') as tfile:
+    np.savetxt(tfile,beamextents, header='Beam extent in right acension (arcsecond), Beam extent in declination (arcsecond)')
+    
 print('\n')
