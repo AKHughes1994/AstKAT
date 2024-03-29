@@ -76,7 +76,6 @@ PlotResults(snr, stdev_Decs_beams, stdev_Decs_beams_err, global_snr, global_stde
 PlotChi(snr, stdev_RAs_beams, stdev_RAs_beams_err, global_snr, global_stdev_RAs_beams, global_stdev_RAs_beams_err, 'RA' , fit_RAs,  'uncorrected',  cfg)
 PlotChi(snr, stdev_Decs_beams, stdev_Decs_beams_err, global_snr, global_stdev_Decs_beams, global_stdev_Decs_beams_err, 'Dec', fit_Decs,  'uncorrected',  cfg) 
 
-'''
 # Solve for and iteratively improve the solutions for the per-epoch global offsets until some threshold value of improvement:
 loop = True
 iteration = 1
@@ -165,4 +164,3 @@ np.save('../results/Dec_epoch_corr_asec_{}'.format(cfg['SOURCE']['name']), [dec_
 np.save('../results/field_catalog_{}_arr'.format(cfg['SOURCE']['name']), np.array(catalog))	
 with open('../results/index_dict.json','w') as jfile:
     json.dump(index_dict,jfile)
-'''
