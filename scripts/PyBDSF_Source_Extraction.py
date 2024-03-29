@@ -1,7 +1,10 @@
-import configparser, glob
-from astropy.io import fits
+import configparser
+import glob
+import os
 import bdsf #PyBDSF
 import numpy as np
+
+from astropy.io import fits
 
 # Read in the configuration file
 cfg = configparser.ConfigParser()
