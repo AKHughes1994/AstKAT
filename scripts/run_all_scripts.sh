@@ -1,8 +1,5 @@
 #!/bin/bash
 
-# Clear old results/plots directory
-rm ../plots/* ../results/*
-
 # Run each image through PyBDSF
 python3 PyBDSF_Source_Extraction.py
 

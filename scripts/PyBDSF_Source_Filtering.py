@@ -1,94 +1,101 @@
-import configparser glob, json
-import numpy as np
-from astropy.io import fits
-from astropy import units as u
-from astropy.coordinates import SkyCoord,match_coordinates_sky
+from utils import *
 
-# Read in the configuration file
-cfg = configparser.ConfigParser()
-cfg.read('config.ini')
 
-sourceCoords = SkyCoord(cfg['POSITIONS']['source_ra'],cfg['POSITIONS']['source_dec'], frame='icrs')
-flux_threshold   = float(cfg['THRESHOLDS']['flux_threshold'])
-size_threshold   = float(cfg['THRESHOLDS']['size_threshold'])
-target_threshold = float(cfg['THRESHOLDS']['target_threshold'])
+def main():
 
-# Load date-time array
-date_times = np.load('../files/date-times.npy')
-image_names = np.load('../files/image-names.npy')
-beams   = []
-beamextents = []
+   # Initialize variables pointing to the relevant directories
+    scripts = os.getcwd()
+    files      = scripts.replace('scripts', 'files')    
+    images = scripts.replace('scripts', 'images')
+    results = scripts.replace('scripts', 'results')
+    plots    = scripts.replace('scripts', 'plots')
 
-# Iterate through the files -- separating target and field sources
-for image_name,date_time in zip(image_names[:],date_times[:]):
-    # Extract the beam size
-    hdu = fits.open(image_name)
-    header = hdu[0].header
-    bmaj = header['BMAJ'] 
-    bmin = header['BMIN']
-    bpa  = np.radians(header['BPA'])
-
-    # Angular extents along x (RA) and y (Dec) directions equivalent to the FWHM projected on x and y plane
-    dec_beam = 2.0 * np.sqrt((bmaj * 0.5) ** 2 * np.cos(bpa) ** 2  + (bmin * 0.5) ** 2 * np.sin(bpa) ** 2)
-    ra_beam  = 2.0 * np.sqrt((bmaj * 0.5) ** 2 * np.sin(bpa) ** 2  + (bmin * 0.5) ** 2 * np.cos(bpa) ** 2)
-    beamextents.append([ra_beam * 3600. ,dec_beam * 3600.]) # For saving a text file
-    beams.append([bmaj * 3600.0, bmin * 3600., bpa]) # For saving a text file
+    # Read in the configuration file
+    cfg = configparser.ConfigParser()
+    cfg.read(f'{scripts}/config.ini')
     
-    print('Filtering: ',date_time)
-    fname = glob.glob('../files/total_field*{}*.fits'.format(date_time))[0] #get filename
-    im = fits.open(fname)
-    target = {'ra' : [], 'dec': [], 'peak':[], 'rms':[], 'ra_beam':[], 'dec_beam':[]}
-    field  = {'ra' : [], 'dec': [], 'peak':[], 'rms':[], 'ra_beam':[], 'dec_beam':[]}
+    # Initialize relevant parameters from the Config Files
+    target_name       = str(cfg['TARGET']['name'])
+    target_ra             = str(cfg['POSITIONS']['target_ra'])
+    target_dec           = str(cfg['POSITIONS']['target_dec'])
+    flux_threshold     = float(cfg['THRESHOLDS']['flux_threshold'])
+    size_threshold     = float(cfg['THRESHOLDS']['size_threshold'])
+    target_threshold = float(cfg['THRESHOLDS']['target_threshold'])
 
-    # Extract data from FITS files
-    ras         = im[1].data['RA']
-    decs        = im[1].data['DEC']
-    source_flux = im[1].data['Total_flux']     # Flux of the source (Jy)
-    rms_err     = im[1].data['isl_rms']        # Get RMS value from background RMS-map local to the source
-    peak_flux   = im[1].data['Peak_flux']      # Flux Density of the peak (Jy/beam)
-    island_flux = im[1].data['Isl_Total_flux'] # Total Flux in the island (Jy)
-    major       = im[1].data['Maj']            # Major Axis of the Source (deg)
-    minor       = im[1].data['Min']            # Minor Axis of the Source (deg)
-    stypes      = im[1].data['S_Code']
-    ra_beams    = np.ones(len(im[1].data['RA'])) * ra_beam
-    dec_beams   = np.ones(len(im[1].data['RA'])) * dec_beam
-
-    # Make SkyCoord object from coordinates
-    allCoords = SkyCoord(ra = ras * u.deg, dec = decs * u.deg, frame='icrs')
-    separations = allCoords.separation(sourceCoords)
-
-    # Find what indexes are target vs.field sources indexes
-    target_index = np.where(separations.arcsec < target_threshold) # Any source within a beam major axis of the source coordinates is recorded as the target
-
-    #######################################################################
-    # Find the Field sources, enforcing point-source conditions           #
-    #  Condition 1: (Default) Peak flux within 25% of the  island_flux    #
-    #  Condition 2: (Default) Source shape within 25% of the beam shape   #
-    #  Condition 3: It is not the target source                           #
-    #######################################################################
+    # SkyCoord objecy contain source coordinates
+    source_coords = SkyCoord(f'{target_ra} {target_dec}', frame='icrs')
     
-    field_index = np.where((abs(peak_flux/island_flux - 1.0) < flux_threshold) & (abs(major/bmaj - 1.0) < size_threshold) & (abs(minor/bmin - 1.0) < size_threshold))[0] 
-    field_index = np.setdiff1d(field_index,target_index) # Remove target from the field index
+    # Load in observation parameters 
+    obs_properties=  load_json(f'{results}/observation_properties.json')
 
-    # Fill target dictionary
-    target['ra'], target['dec'], target['peak'], target['rms'], target['ra_beam'], target['dec_beam'] = ras[target_index].tolist(), decs[target_index].tolist(), peak_flux[target_index].tolist(), rms_err[target_index].tolist(), ra_beams[target_index].tolist(), dec_beams[target_index].tolist()
+    # Iterate through the files -- separating target and field sources
+    for k,obs_isot in enumerate(obs_properties['obs_isot'][:]):
 
-    # Fill field source dictionary
-    field['ra'], field['dec'], field['peak'], field['rms'], field['ra_beam'], field['dec_beam'] = ras[field_index].tolist(), decs[field_index].tolist(), peak_flux[field_index].tolist(), rms_err[field_index].tolist(), ra_beams[field_index].tolist(), dec_beams[field_index].tolist()
+        msg(f'Filtering: {obs_isot}')
 
-    # Save the individual epoch dictionaries
-    with open('../files/fieldsources_{}_{}.json'.format(date_time,cfg['SOURCE']['name']),'w') as jfile:
-        json.dump(field,jfile)
+        # Open PyBDSF fits catalog output
+        fname = glob.glob(f'{files}/total*{obs_isot}*.fits')[0] #get filename
+        im = fits.open(fname)
 
-    with open('../files/target_{}_{}.json'.format(date_time,cfg['SOURCE']['name']),'w') as jfile:
-        json.dump(target,jfile)
+        # Initialize dictionaries to store  revelant parameters
+        target = {'ra_deg' : [], 'dec_deg': [], 'peak_Jy':[], 'rms_Jy':[], 'ra_extent_deg':[], 'dec_extent_deg':[]}
+        field    = {'ra_deg' : [], 'dec_deg': [], 'peak_Jy':[], 'rms_Jy':[], 'ra_extent_deg':[], 'dec_extent_deg':[]}
 
-#Save beamsizes as a text file
-with open('../results/beams.txt', 'w') as tfile:
-    np.savetxt(tfile,beams,header='BMAJ (arcsec), BMIN (arcsec), BPA (deg)')
+        # Extract data from FITS files
+        ra                 = im[1].data['RA']
+        dec              = im[1].data['DEC']
+        source_flux = im[1].data['Total_flux']              # Flux of the source (Jy)
+        rms_err       = im[1].data['isl_rms']                  # Get RMS value from background RMS-map local to the source
+        peak_flux    = im[1].data['Peak_flux']             #  Flux Density of the peak (Jy/beam)
+        island_flux  = im[1].data['Isl_Total_flux']       # Total Flux in the island (Jy)
+        major           = im[1].data['Maj_img_plane']   # Major Axis of the Source (deg)
+        minor           = im[1].data['Min_img_plane']   # Minor Axis of the Source (deg)
+        stype           = im[1].data['S_Code']
+        ra_extent    = np.ones(len(ra)) * obs_properties['ra_extent_deg'][k]
+        dec_extent  = np.ones(len(dec)) * obs_properties['dec_extent_deg'][k]
 
-#Save beamsizes as a text file
-with open('../results/beamextents.txt', 'w') as tfile:
-    np.savetxt(tfile,beamextents, header='Beam extent in right acension (arcsecond), Beam extent in declination (arcsecond)')
-    
-print('\n')
+        # Make SkyCoord object from coordinates
+        allCoords = SkyCoord(ra = ra * u.deg, dec = dec * u.deg, frame='icrs')
+        separations = allCoords.separation(source_coords)
+
+        # Find what indexes are target vs.field sources indexes -- Within [target_threshold] arcsec
+        target_index = np.where(separations.arcsec < target_threshold) 
+
+        ##################################################
+        # Find the Field sources, enforcing point-source conditions                     #
+        #   Condition 1: (Default) Peak flux within 25% of the  island_flux            #
+        #   Condition 2: (Default) Source shape within 25% of the beam shape   #
+        #   Condition 3: It is not the target source                                                   #
+        ## ###############################################
+
+        # Define conditions     
+        bmaj = obs_properties['bmaj_deg'][k]
+        bmin = obs_properties['bmin_deg'][k]
+
+        flux_condition   = abs(peak_flux/island_flux - 1.0) 
+        bmaj_condition = abs(major/bmaj - 1.0)
+        bmin_condition = abs(minor/bmin - 1.0)
+
+        # Point sources
+        field_index = np.where((flux_condition < flux_threshold) & (bmaj_condition < size_threshold) & (bmin_condition < size_threshold))[0] 
+
+        # Remove target(s) from the field indexes
+        field_index = np.setdiff1d(field_index,target_index) 
+
+        # Fill target dictionary
+        target['ra_deg'], target['dec_deg'], target['peak_Jy'], target['rms_Jy'], target['ra_extent_deg'], target['dec_extent_deg'] = ra[target_index].tolist(), dec[target_index].tolist(), peak_flux[target_index].tolist(), rms_err[target_index].tolist(), ra_extent[target_index].tolist(), dec_extent[target_index].tolist()
+
+        # Fill field source dictionary
+        field['ra_deg'], field['dec_deg'], field['peak_Jy'], field['rms_Jy'], field['ra_extent_deg'], field['dec_extent_deg'] = ra[field_index].tolist(), dec[field_index].tolist(), peak_flux[field_index].tolist(), rms_err[field_index].tolist(), ra_extent[field_index].tolist(), dec_extent[field_index].tolist()
+
+
+        # Save the individual epoch dictionaries -- Field sources
+        with open(f'{files}/field_{obs_isot}_{target_name}.json', 'w') as j:
+            j.write(json.dumps(field, indent=4))
+
+        # Target sources
+        with open(f'{files}/target_{obs_isot}_{target_name}.json','w') as j:
+            j.write(json.dumps(target, indent=4))
+
+if __name__ in "__main__":
+    main()

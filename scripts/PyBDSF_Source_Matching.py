@@ -1,165 +1,132 @@
-import numpy as np
-import matplotlib.pyplot as plt
-import json, glob, configparser
-from astropy.io import fits
-from astropy import units as u
-from astropy.coordinates import SkyCoord,match_coordinates_sky
+from utils import *
 
-# Read in the configuration file
-cfg = configparser.ConfigParser()
-cfg.read('../scripts/config.ini')
 
-match_threshold         = float(cfg['THRESHOLDS']['match_threshold'])
-epoch_min               = float(cfg['THRESHOLDS']['epoch_min'])
-epoch_fraction          = float(cfg['THRESHOLDS']['epoch_fraction'])
-variability_threshold  = float(cfg['THRESHOLDS']['variability_threshold'])
-snr_threshold           = float(cfg['THRESHOLDS']['snr_threshold'])
+def main():
 
-# Load date-time array
-date_times = np.load('../files/date-times.npy')
+    # Initialize variables pointing to the relevant directories
+    scripts = os.getcwd()
+    files      = scripts.replace('scripts', 'files')    
+    images = scripts.replace('scripts', 'images')
+    results = scripts.replace('scripts', 'results')
+    plots    = scripts.replace('scripts', 'plots')
 
-# Use first epoch as reference
-ref_index = 0
-
-with open('../files/fieldsources_{}_{}.json'.format(date_times[ref_index],cfg['SOURCE']['name']), 'r') as jfile:
-    reference = json.load(jfile)
-referenceCoords = SkyCoord(reference['ra'],reference['dec'],frame='icrs',unit='deg')
-
-############################################################ 
-# Initialize the numpy array that will contain the data    #
-# Array will have dimensions (n_sources, n_epochs, n_vars) #
-# Initially n_vars will be:                                #  
-# 0 -- Right Acension (deg)                                #
-# 1 -- Declination (deg)                                   #    
-# 2 -- Source Flux density (Jy/beam)                       #
-# 3 -- RMS (Jy/beam)                                       #   
-# 4 -- signal-to-noise  ratio                              #
-# 5 -- Extent of beam in RA                                #
-# 6 -- Extent of beam in Dec                               #
-# 7 -- Separataion from phase (i.e. pointing centre)       #
-############################################################
-
-n_sources = len(reference['ra'])
-n_epochs  = len(date_times)
-n_vars    = 8
-catalog   = np.empty((n_sources,n_epochs,n_vars)) * np.nan
-
-# Append the reference data
-catalog[:,ref_index,0] = referenceCoords.ra.value
-catalog[:,ref_index,1] = referenceCoords.dec.value
-catalog[:,ref_index,2] = reference['peak']
-catalog[:,ref_index,3] = reference['rms']
-catalog[:,ref_index,4] = np.array(reference['peak'])/np.array(reference['rms'])
-catalog[:,ref_index,5] = reference['ra_beam']
-catalog[:,ref_index,6] = reference['dec_beam']
-
-# For matching remove reference epoch from arrays being iterated through
-epoch_indexes = np.arange(len(date_times)) #indices for storing in the catalog 
-epoch_indexes = np.delete(epoch_indexes, ref_index)
-epochs = np.delete(date_times, ref_index)
-
-# Iterate through the images
-for epoch_index, epoch in zip(epoch_indexes[:], epochs[:]):
-    print('Matching: ', epoch)
-
-    # Define the field source coords
-    with open('../files/fieldsources_{}_{}.json'.format(epoch,cfg['SOURCE']['name']), 'r') as jfile:
-        field = json.load(jfile)
-
-    for key in field.keys():
-        field[key] = np.array(field[key])
-
-    # Define a SkyCoord object containing all field source positions
-    fieldCoords = SkyCoord(field['ra'],field['dec'],frame='icrs',unit='deg')
+    # Read in the configuration file
+    cfg = configparser.ConfigParser()
+    cfg.read(f'{scripts}/config.ini')
     
-    #Initialize 2-D array containing the epoch parameters (n_sources,n_vars)
-    epoch_catalog = np.empty((len(field['ra']), n_vars))  * np.nan
-    epoch_catalog[:,0] = fieldCoords.ra.value
-    epoch_catalog[:,1] = fieldCoords.dec.value
-    epoch_catalog[:,2] = field['peak']
-    epoch_catalog[:,3] = field['rms']
-    epoch_catalog[:,4] = field['peak']/field['rms']
-    epoch_catalog[:,5] = field['ra_beam']
-    epoch_catalog[:,6] = field['dec_beam']
-
-    ############################################################
-    # Note the duplicate trimming is a very convoluted routine #
-    # I was unable to escape the doom that is for loops !!!!!! #
-    # If you are reading this and have a better idea please !! #
-    # Email me at hughes1@ualberta.ca !!!!!!!!!!!!!!!!!!!!!!!! #
-    ############################################################ 
-
-    # Match the source in the current image to the reference
-    match = match_coordinates_sky(fieldCoords,referenceCoords)
-    offsets = match[1].value * 3600.0 # convert to arcseconds
-    sources = match[0]
-
-    # Sort the indexes according to the reference catalog source numbers; so it goes [0,0,0,1,1,2,2,...etc.]
-    sorted_index = np.argsort(sources)
-    offsets = offsets[sorted_index]
-    sources = sources[sorted_index]
-    epoch_catalog = epoch_catalog[sorted_index,:]
+    # Load in config file parameters
+    target_name               = str(cfg['TARGET']['name'])
+    phase_center_ra         = str(cfg['POSITIONS']['phase_center_ra'])
+    phase_center_dec       = str(cfg['POSITIONS']['phase_center_dec'])
+    match_threshold        = float(cfg['THRESHOLDS']['match_threshold'])
+    epoch_min                  = float(cfg['THRESHOLDS']['epoch_min'])
+    epoch_fraction           = float(cfg['THRESHOLDS']['epoch_fraction'])
+    variability_threshold = float(cfg['THRESHOLDS']['variability_threshold'])
+    snr_threshold             = float(cfg['THRESHOLDS']['snr_threshold'])
+    ref_index                     = int(cfg['THRESHOLDS']['ref_index'])
     
-    # Get the position for duplicates + number of duplicates, sort the offsets so the first element in a chain of duplicates is the smallest offset (e.g., [0,0,0], [1,2,3])
-    arr, inds, counts = np.unique(sources, return_index=True, return_inverse=False, return_counts=True)
-
-    for ind, count in zip(inds,counts):
-        sorted_index = ind + np.argsort(offsets[ind:ind + count])
-        offsets[ind:ind + count] = offsets[sorted_index]
-        epoch_catalog[ind:ind + count, :] = epoch_catalog[sorted_index, :]
+    # SkyCoord objecy contain source coordinates
+    source_coords = SkyCoord(f'{phase_center_ra} {phase_center_dec}', frame='icrs')
     
-    # Trim the duplicates so the arrays only have 1 source per reference sources (with the smallest offset from the reference)
-    sources, inds = np.unique(sources,return_index=True)
-    offsets = offsets[inds]
-    epoch_catalog = epoch_catalog[inds,:]
+    # Load in observation parameters 
+    obs_properties = load_json(f'{results}/observation_properties.json')
+    obs_isots = obs_properties['obs_isot']
 
-    # Check for matches that are within the match threshold (default is 5 arcseconds)
-    good_matches = np.where(offsets < match_threshold)
-    catalog[sources[good_matches],epoch_index, :] = epoch_catalog[good_matches,:]
+    # Initialize the reference epoch
+    reference = load_json(f'{files}/field_{obs_isots[ref_index]}_{target_name}.json')
+    reference_coords = SkyCoord(reference['ra_deg'] * u.deg,reference['dec_deg'] * u.deg,frame='icrs') 
+    reference['snr'] = np.array(reference['peak_Jy'])/np.array(reference['rms_Jy'])
 
-#############################
-# Remove transient sources  #
-#############################
+    ##########################################
+    # Initialize the numpy array that will contain the data          #
+    # Array will have dimensions (n_sources, n_epochs, n_vars) #
+    # Initially n_vars will be:                                                            #  
+    # 0 -- Right Acension (deg)                                                        #
+    # 1 -- Declination (deg)                                                              #    
+    # 2 -- Source Flux density (Jy/beam)                                        #
+    # 3 -- RMS (Jy/beam)                                                                  #   
+    # 4 -- signal-to-noise  ratio                                                       #
+    # 5 -- Extent of beam in RA                                                       #
+    # 6 -- Extent of beam in Dec                                                     #
+    # 7 -- Separataion from phase (i.e. pointing centre)             #
+    #########################################
 
-# For each source count the number of epochs with NaN values, the max flux, and min flux, and median SNR
-n_nans       = np.count_nonzero(np.isnan(catalog[:,:,4]), axis=1)
-max_flux     = np.nanmax(catalog[:,:, 2], axis=1)
-min_flux     = np.nanmin(catalog[:,:, 2], axis=1)
-median_snr   = np.nanmedian(catalog[:,:, 4], axis=1)
+    # Initialize catalog array with the appropraite dimensions
+    n_sources = len(reference['ra_deg'])
+    n_epochs  = len(obs_isots)
+    n_vars    = 8
+    catalog   = np.empty((n_sources,n_epochs,n_vars)) * np.nan
 
-# Remove Variables + Transients; i.e., 
-# Sources with too many np.nans (i.e., include sources that have NaN values in less than epoch_fraction% of the epochs also ensure a minimum number of epochs)
-# Sources where the maximum and minimum values are separated by a factor < variability threshold:
-epoch_threshold   = np.amin((epoch_fraction * len(date_times), epoch_min))
+    # Truncated sources outside the desired PB cutoff (units of deg)
+    phase_center_coords = SkyCoord(f'{phase_center_ra} {phase_center_dec}', frame='icrs')
+    phase_center_offset  = reference_coords.separation(phase_center_coords).deg
 
-good_sources = np.where((n_nans < epoch_threshold) & (max_flux < variability_threshold * min_flux))
-catalog = catalog[good_sources[0],:,:]
+    # Append the reference data to the array
+    catalog[:,ref_index,0] = reference['ra_deg'] 
+    catalog[:,ref_index,1] = reference['dec_deg'] 
+    catalog[:,ref_index,2] = reference['peak_Jy']
+    catalog[:,ref_index,3] = reference['rms_Jy']
+    catalog[:,ref_index,4] = reference['snr'] 
+    catalog[:,ref_index,5] = reference['ra_extent_deg']
+    catalog[:,ref_index,6] = reference['dec_extent_deg']
+    catalog[:,ref_index,7] = phase_center_offset
 
-###########################################
-# Solve for offsets from the phase center #
-###########################################
+    # For matching remove reference epoch from arrays being iterated through
+    epoch_indexes = np.arange(n_epochs) 
+    epoch_indexes = np.delete(epoch_indexes, ref_index)
 
-# Phase offsets -- record the position of the nans and temporarily make them zeros 
-nan_locs = np.isnan(catalog)
-nan_locs[:,:,7] = nan_locs[:,:,0]
-catalog = np.nan_to_num(catalog)
+    # Iterate through the images
+    for  epoch_index  in epoch_indexes[:]:
+        
+        obs_isot = obs_isots[epoch_index]
+        msg(f'Matching: {obs_isot}')
 
-# Calculate the phase offsets with respect to the pointing center
-phase_center = SkyCoord("{} {}".format(cfg['POSITIONS']['phase_center_ra'],cfg['POSITIONS']['phase_center_dec']), frame='icrs')
-c0 = SkyCoord(ra = catalog[:,:,0]*u.deg, dec = catalog[:,:,1]*u.deg, frame='icrs')
-catalog[:,:,7] = c0.separation(phase_center).deg
+        # Get relevant observation paramters
+        bmaj      = obs_properties['bmaj_deg'][epoch_index]
+        field       = load_json(f'{files}/field_{obs_isot}_{target_name}.json')
+        field['snr'] = np.array(field['peak_Jy'])/np.array(field['rms_Jy'])
+        beam_threshold = match_threshold * bmaj
 
-#Repopulate with nans
-catalog[nan_locs] = np.nan
+        # Define a SkyCoord object containing all field source positions
+        field_coords = SkyCoord(field['ra_deg'] * u.deg, field['dec_deg'] * u.deg,frame='icrs')
+        phase_center_offset  = field_coords.separation(phase_center_coords).deg
 
-#########################################
-# Save numpy array and index dictionary #
-#########################################
+        #Initialize 2-D array containing the epoch parameters (n_sources,n_vars)
+        epoch_catalog = np.empty((len(field['ra_deg']), n_vars))  * np.nan
+        epoch_catalog[:,0] = field['ra_deg']
+        epoch_catalog[:,1] = field['dec_deg']
+        epoch_catalog[:,2] = field['peak_Jy']
+        epoch_catalog[:,3] = field['rms_Jy']
+        epoch_catalog[:,4] = field['snr']
+        epoch_catalog[:,5] = field['ra_extent_deg']
+        epoch_catalog[:,6] = field['dec_extent_deg']
+        epoch_catalog[:,7] = phase_center_offset
 
-#Save the index dictionary and catalog array
-index_dict = {'ra': 0, 'dec': 1, 'peak_flux': 2, 'rms': 3, 'snr': 4, 'ra_beam': '5', 'dec_beam':'6', 'phase_offset':'7'}
-with open('../files/index_dict_{}.json'.format(cfg['SOURCE']['name']),'w') as jfile:
-    json.dump(index_dict,jfile)
+        # Match the source in the current image to the reference
+        match             = match_coordinates_sky(field_coords,reference_coords)
+        match_offset  = match[1].value 
+        match_index  = match[0]
 
-np.save('../files/field_catalog_{}_arr'.format(cfg['SOURCE']['name']),catalog)
-print('\n')
+        # Get good matches and update epoch catalog
+        good_matches = np.where(match_offset < beam_threshold)[0]
+        catalog[match_index[good_matches], epoch_index, :] = epoch_catalog[good_matches,:]
+
+    # For each source count the number of epochs with NaN values, the max flux, and min flux, and median SNR
+    n_nans         = np.count_nonzero(np.isnan(catalog[:,:,4]), axis=1)
+    max_flux      = np.nanmax(catalog[:,:, 2], axis=1)
+    min_flux       = np.nanmin(catalog[:,:, 2], axis=1)
+
+    
+    # Remove sources that do not exist within a minimum number of epochs or are highly variable
+    epoch_threshold   = np.amin((epoch_fraction * n_epochs, epoch_min))
+    good_sources = np.where((n_nans < epoch_threshold) & (max_flux < variability_threshold * min_flux))
+    catalog = catalog[good_sources[0],:,:]
+
+    #The array and a json dictionary  containing the index mapping for the array
+    index_dict = {'ra': 0, 'dec': 1, 'peak_flux': 2, 'rms': 3, 'snr': 4, 'ra_beam': '5', 'dec_beam':'6', 'phase_offset':'7'}
+    with open(f'{files}/index_dict_{target_name}.json', 'w') as j:
+        j.write(json.dumps(index_dict, indent=4))
+    np.save(f'{files}/field_catalog_{target_name}',catalog)
+
+if __name__ in "__main__":
+    main()
