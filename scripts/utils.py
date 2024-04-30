@@ -135,7 +135,7 @@ def SolveForEpochCorrection(data, fit_ra, fit_dec):
 
     # Solve for per epoch offsets
     ra_corr, ra_corr_err      = (AverageByEpoch(filter_data, weight = weight_ra, error=True))[:,-2]
-    dec_corr, dec_corr_err = (AverageByEpoch(filter_data, weight = weight_ra, error=True))[:.-1]
+    dec_corr, dec_corr_err = (AverageByEpoch(filter_data, weight = weight_ra, error=True))[:,-1]
 
     return [ra_corr, ra_corr_err , dec_corr, dec_corr_err]
 
