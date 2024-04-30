@@ -11,7 +11,7 @@ def main():
     
     for directory in [files, results, plots]:
         if not os.path.exists(directory):
-            msg(f'Initializing Directory {directory}')
+            msg(f'Extracting: Initializing Directory {directory}')
             os.makedirs(directory)
 
     # Read in the configuration file
@@ -88,8 +88,8 @@ def main():
 
     with open(f'{results}/observation_properties.json', 'w') as j:
         j.write(json.dumps(obs_properties, indent=4))
-    
-'''
+
+    msg('Extracting: Running PyBDSF')    
     # Run each image through PyBDSF
     for image_name, obs_isot in zip(image_names,obs_isots): #All images
 
@@ -106,6 +106,6 @@ def main():
                                     catalog_type=output_file_type, 
                                     outfile = f'{files}/total_{obs_isot}_{target_name}.fits', 
                                     clobber=True)
-'''
+
 if __name__ in "__main__":
     main()
