@@ -26,12 +26,13 @@ def main():
 
     # Initialize arrays
     image_identifiers = []
-    obs_isots               = []
-    bmajs                    = []
-    bmins                    = []
-    bpas                      = []
-    ra_extents            = []
-    dec_extents          = []
+    obs_isots         = []
+    bmajs             = []
+    bmins             = []
+    bpas              = []
+    freqs             = []
+    ra_extents        = []
+    dec_extents       = []
 
     # Iterate through the images extracting the relevant parameters
     image_names = sorted(glob.glob(f'{images}/*image.fits'))
@@ -43,9 +44,10 @@ def main():
         # Load in the header and pull out relevant properties
         header = fits.getheader(image_name)
         obs_isot               = header['DATE-OBS']
-        bmaj                    = header['BMAJ']
-        bmin                    = header['BMIN']
-        bpa                      = header['BPA']
+        bmaj                   = header['BMAJ']
+        bmin                   = header['BMIN']
+        bpa                    = header['BPA']
+        freq                   = header['CRVAL3'] / 1e9
 
         # Calculate the extents (this is a place holder) -- Need to figure out best spatial scale
         a = bmaj 
@@ -66,6 +68,7 @@ def main():
         bmajs.append(bmaj)
         bmins.append(bmin)
         bpas.append(bpa)
+        freqs.append(freq)
         ra_extents.append(ra_extent)
         dec_extents.append(dec_extent)
     
@@ -76,9 +79,10 @@ def main():
     obs_properties = {
                                 'image_identifier': image_identifiers,
                                 'obs_isot': obs_isots,
-                                'bmaj_deg': bmajs,
+                                'bmaj_deg': bmajs,  
                                 'bmin_deg': bmins,
                                 'bpa_deg': bpas,
+                                'freq_GHz': freqs,
                                 'ra_extent_deg': ra_extents,
                                 'dec_extent_deg': dec_extents,
                               }
@@ -90,8 +94,9 @@ def main():
         j.write(json.dumps(obs_properties, indent=4))
 
     msg('Extracting: Running PyBDSF')    
+
     # Run each image through PyBDSF
-    for image_name, obs_isot in zip(image_names,obs_isots): #All images
+    for image_name, obs_isot in zip(image_names[-1:],obs_isots[-1:]): #All images
 
         # PyBDSF run
         img = bdsf.process_image(image_name,

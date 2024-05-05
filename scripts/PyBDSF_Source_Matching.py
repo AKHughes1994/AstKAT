@@ -112,15 +112,23 @@ def main():
         catalog[match_index[good_matches], epoch_index, :] = epoch_catalog[good_matches,:]
 
     # For each source count the number of epochs with NaN values, the max flux, and min flux, and median SNR
-    n_nans         = np.count_nonzero(np.isnan(catalog[:,:,4]), axis=1)
-    max_flux      = np.nanmax(catalog[:,:, 2], axis=1)
-    min_flux       = np.nanmin(catalog[:,:, 2], axis=1)
-
+    n_nans   = np.count_nonzero(np.isnan(catalog[:,:,4]), axis=1)
+    max_flux = np.nanmax(catalog[:,:, 2], axis=1)
+    min_flux = np.nanmin(catalog[:,:, 2], axis=1)
     
     # Remove sources that do not exist within a minimum number of epochs or are highly variable
     epoch_threshold   = np.amin((epoch_fraction * n_epochs, epoch_min))
     good_sources = np.where((n_nans < epoch_threshold) & (max_flux < variability_threshold * min_flux))
     catalog = catalog[good_sources[0],:,:]
+
+
+    min_snr = np.nanmedian(catalog[:,:,4], axis = 1)
+    #print(epoch_threshold, n_epochs)
+    print(np.amin(min_snr))
+    #print(catalog[np.argmin(min_snr), :, 4])
+    #print(catalog[np.argmin(min_snr), :, 3])
+    #print(catalog[np.argmin(min_snr), :, 2])
+    #print(np.nanargmin(catalog[np.argmin(min_snr), :, 4]))
 
     #The array and a json dictionary  containing the index mapping for the array
     index_dict = {'ra': 0, 'dec': 1, 'peak_flux': 2, 'rms': 3, 'snr': 4, 'ra_beam': '5', 'dec_beam':'6', 'phase_offset':'7'}

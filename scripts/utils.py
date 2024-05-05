@@ -72,7 +72,7 @@ def NanAverage(data,weights=None, error=False, axis=0):
         avg = np.ma.average(ma, weights=weights, axis=axis)
         if error:
             ma = np.ma.MaskedArray(weights, mask=np.isnan(data))
-            err = np.ma.sum(ma, axis=axis) ** (-0.5) # This only works if its a 1-D array so it can't work for Source averaging
+            err = np.ma.sum(ma, axis=axis) ** (-0.5) # This only works if weights are originally a 1-D array so it can't work for Source averaging
             return avg, err
         else:
             return avg
@@ -109,11 +109,11 @@ def SolveForEpochCorrection(data, fit_ra, fit_dec):
     '''
 
     # Initial Uncorrected MCMC iteration
-    ra                 = data[:,:,0]
-    dec               = data[:,:,1]
-    snr               = data[:,:,4]
+    ra           = data[:,:,0]
+    dec          = data[:,:,1]
+    snr          = data[:,:,4]
     ra_extent    = data[:,:,5]
-    dec_extent  = data[:,:,6]
+    dec_extent   = data[:,:,6]
 
     # Solve for the average positions    
     avg_ra, avg_dec = AveragePositions(ra, dec,'source',weight=snr)
@@ -129,13 +129,20 @@ def SolveForEpochCorrection(data, fit_ra, fit_dec):
     data = AppendValues(data, delta_ra)
     data = AppendValues(data, delta_dec)
 
+    # Solve for source averaged SN ratio followed by the weights
+    avg_snr = MedianBySource(data)[:,4]
+    weight_ra  = stdfit(avg_snr, fit_ra['A'][0], fit_ra['B'][0]) ** (-2)
+    weight_dec = stdfit(avg_snr, fit_dec['A'][0], fit_dec['B'][0]) ** (-2)
+
     # Reshape array for to simplify matrix operations 
     weight_ra = np.tile(weight_ra[:, np.newaxis, np.newaxis], (1, data.shape[1], data.shape[2]))
     weight_dec = np.tile(weight_dec[:, np.newaxis, np.newaxis], (1, data.shape[1], data.shape[2]))
 
     # Solve for per epoch offsets
-    ra_corr, ra_corr_err      = (AverageByEpoch(filter_data, weight = weight_ra, error=True))[:,-2]
-    dec_corr, dec_corr_err = (AverageByEpoch(filter_data, weight = weight_ra, error=True))[:,-1]
+    ra_corr,  ra_corr_err  = AverageByEpoch(data, weight = weight_ra, error=True)
+    ra_corr,  ra_corr_err  = ra_corr[:,-2], ra_corr_err[:,-2]
+    dec_corr, dec_corr_err = AverageByEpoch(data, weight = weight_dec, error=True)
+    dec_corr, dec_corr_err = dec_corr[:,-1], dec_corr_err[:,-1]
 
     return [ra_corr, ra_corr_err , dec_corr, dec_corr_err]
 
@@ -146,11 +153,11 @@ def BootstrapPositions(data, n_bootstrap=500):
     '''
 
     # Initial Uncorrected MCMC iteration
-    ra                 = data[:,:,0]
-    dec               = data[:,:,1]
-    snr               = data[:,:,4]
+    ra           = data[:,:,0]
+    dec          = data[:,:,1]
+    snr          = data[:,:,4]
     ra_extent    = data[:,:,5]
-    dec_extent  = data[:,:,6]
+    dec_extent   = data[:,:,6]
 
     # Solve for the average positions    
     avg_ra, avg_dec = AveragePositions(ra, dec,'source',weight=snr)
@@ -159,7 +166,7 @@ def BootstrapPositions(data, n_bootstrap=500):
     _, _, delta_ra, delta_dec = DecomposeDeltaCoord(avg_ra, avg_dec, ra, dec)
 
     # Convert to be in units of beams
-    delta_ra    /= ra_extent
+    delta_ra  /= ra_extent
     delta_dec /= dec_extent
 
     # Append offsets to data array 
@@ -183,8 +190,8 @@ def BootstrapPositions(data, n_bootstrap=500):
     dec_err = np.amax([err_minus[:,-1], err_plus[:,-1]], axis=0)
 
     # Signal-to-noise Ratio
-    average_data = AverageBySource(data)
-    snr = np.array(average_data[:,4])
+    avg_data = MedianBySource(data)
+    snr = np.array(avg_data[:,4])
 
     # Return the values for fitting
     return np.array([snr, ra, ra_err, dec, dec_err])
@@ -198,8 +205,8 @@ def FilterData(data,snr_low=0.0,snr_high=1e10, phase_offset_thresh=1e10):
             snr_high = 1e10
             phase_offset_thresh = 1e10 [deg]
     '''
-    average_data = AverageBySource(data)
-    snr, offset = average_data[:,4], average_data[:,7]
+    avg_data = AverageBySource(data)
+    snr, offset = avg_data[:,4], avg_data[:,7]
 
     snr_index  = np.where((snr > snr_low) & (snr < snr_high))[0]
     po_index = np.where(offset < phase_offset_thresh)[0]
@@ -411,7 +418,7 @@ def MCMC(data, plot_prefix):
     # Break data into relevant components
     snr        = data[0]
     std        = data[1]
-    std_err = data[2]
+    std_err    = data[2]
 
     def log_prior(p): #log prior
         A,B=p[0],p[1]
