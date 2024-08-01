@@ -9,14 +9,10 @@ A routine to empirically determine the astrometric error for the time domain wit
 ---
 ### The Controlling Parameters are in the config.ini file
 
-* INFO — The ms file is averaged in this step; creates a `json` dictionary called "pre_fields" that contains index-to-name mapping
-* 1GC  — Calibration now included leakage and cross-hand phase calibration
-* 2GC  — FLAG and 2GC have been combined into a single setup; all imaging/masking/self-cal is now in 2GC
-
-**name** = Just the name of the source (used for making plots)
+* name — Just the name of the source (used for making plots)
 
 ##### [POSITIONS]
-**source_ra/dec** = the known position of your source 
+* source_ra/dec — the known position of your source 
 
 **phase_center_ra/dec** = the phase pointing center of the instrument (often offset from the source position by ~15 asec)
 
