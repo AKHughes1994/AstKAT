@@ -93,7 +93,6 @@ def main():
 
     msg('Extracting: Running PyBDSF')    
 
-'''
     # Run each image through PyBDSF
     for image_name, obs_isot in zip(image_names[6:],obs_isots[6:]): #All images
         msg(f'Extracting: {obs_isot}')
@@ -112,6 +111,6 @@ def main():
                                     catalog_type=output_file_type, 
                                     outfile = f'{files}/total_{obs_isot}_{target_name}.fits', 
                                     clobber=True)
-'''
+        
 if __name__ in "__main__":
     main()
