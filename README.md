@@ -9,17 +9,20 @@ A routine to empirically determine the astrometric error for the time domain wit
 ---
 ### The Controlling Parameters are in the config.ini file
 
-* name — Just the name of the source (used for making plots)
+#### [TARGET]
 
-##### [POSITIONS]
-* source_ra/dec — the known position of your source 
+* name — Name of the source/target (used for naming of output files plots)
 
-**phase_center_ra/dec** = the phase pointing center of the instrument (often offset from the source position by ~15 asec)
+#### [POSITIONS]
+* target_ra — Right ascension of target: in astropy SkyCoord format "hms"
+* target_dec — Declination of target: in astropy SkyCoord format "dms"
+* phase_center_ra — Right ascension of phase/pointing centre: in astropy SkyCoord format "hms"
+* phase_center_dec — Declination of of phase/pointing centre: in astropy SkyCoord format "dms"
 
-##### [PYBDSF]
-**snr_threshold** = minimum signal-to-nouse (snr) ratio for PyBDSF to identify the source (Default = 4.0)
-**fix_to_beam** = decided whether PyBDSF fits all of the Gaussian components to be the shape of the beam (Default = True)
-**output_file_type** = type of output catalog (Default='srl') look at PyBDSF documentation for more details
+#### [PYBDSF]
+* snr_threshold — minimum signal-to-nouse (SNR) ratio for PyBDSF to identify the source (Default = 3.5). Make it ~0.5 less than the desired minimum source SNR
+* fix_to_beam — decided whether PyBDSF fits all of the Gaussian components to be the shape of the PSF (Default = True)
+* output_file_type — a type of output catalogue (Default='srl'), `source list' see https://pybdsf.readthedocs.io/en/latest/ for more information
 
 ##### [THRESHOLDS]
 **variability_threshold** = maximum separation between the min/max flux before the source is rejected; i.e., max_flux <  variability_threshold * min_flux (Default = 2.0)
