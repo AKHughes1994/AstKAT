@@ -6,7 +6,10 @@
 
 This routine empirically determines the astrometric error for the time domain with radio interferometric data (Originally Designed for MeerKAT observation). See the files:
 * explanation.pdf — for a Chapter describing the routine
-* (COMING SOON) example.py — for an example of how to use the output to quantify astrometric errors/plot 
+* (COMING SOON) example.py — for an example of how to use the output to quantify astrometric errors/plot
+
+
+Running it is easy: put all your images in the `image` directory and then `cd` into the `scripts` directory and enter `./run_all_scripts.sh`. The output called `observation_properties.json` should have everything you need/
 
 ---
 ### The Controlling Parameters are in the config.ini file
