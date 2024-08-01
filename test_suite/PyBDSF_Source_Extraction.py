@@ -4,10 +4,10 @@ def main():
 
     # Initialize variables pointing to the relevant directories
     scripts = os.getcwd()
-    files  = scripts.replace('scripts', 'files')
-    images = scripts.replace('scripts', 'images')
-    results = scripts.replace('scripts', 'results')
-    plots   = scripts.replace('scripts', 'plots')
+    files  = scripts.replace('test_suite', 'files')
+    images = scripts.replace('test_suite', 'images')
+    results = scripts.replace('test_suite', 'results')
+    plots   = scripts.replace('test_suite', 'plots')
     
     for directory in [files, results, plots]:
         if not os.path.exists(directory):
