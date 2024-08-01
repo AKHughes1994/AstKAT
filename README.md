@@ -4,7 +4,9 @@
 
 ### What is this?
 
-This routine empirically determines the astrometric error for the time domain with radio interferometric data (Originally Designed for MeerKAT observation). See the file `explanation.pdf' for the motivation behind the routine and a description. 
+This routine empirically determines the astrometric error for the time domain with radio interferometric data (Originally Designed for MeerKAT observation). See the files:
+* explanation.pdf — for a Chapter describing the routine
+* (COMING SOON) example.py — for an example of how to use the output to quantify astrometric errors/plot 
 
 ---
 ### The Controlling Parameters are in the config.ini file
