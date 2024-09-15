@@ -436,8 +436,8 @@ def MCMC(data, plot_prefix):
     def log_prior(p): 
         A, B =p[0], p[1]
         prior = 0.0
-        prior += ss.uniform.logpdf(A,loc=0.0,scale=2.0)
-        prior += ss.uniform.logpdf(B,loc=0.0,scale=2.0)
+        prior += ss.uniform.logpdf(A,loc=0.0,scale=10.0)
+        prior += ss.uniform.logpdf(B,loc=0.0,scale=10.0)
         
         if np.isnan(prior):
             return(-np.inf)
