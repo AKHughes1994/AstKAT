@@ -550,7 +550,7 @@ def PlotResults(data0, fit0, data = None, fit = None, plot_prefix = 'Fit', ylim 
     # Plot the data + MCMC model
     ax.set_yscale('log')
     ax.set_xscale('log')
-    ax.set_ylabel('Relative Astrometric Error ($\hat{\sigma}_r$)',fontfamily='serif',fontsize=15)
+    ax.set_ylabel(r'Relative Astrometric Error ($\hat{\sigma}_r$)',fontfamily='serif',fontsize=15)
     ax.set_xlabel('(S/N)$_{med}$', fontfamily='serif', fontsize=15)
     ax.legend(framealpha=1.0, fontsize=15, prop={'family':'serif'}).set_zorder(10000000)
 

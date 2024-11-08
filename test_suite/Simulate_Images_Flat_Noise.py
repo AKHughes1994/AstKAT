@@ -120,6 +120,10 @@ def GenerateRandomImage(iteration):
         y_off = 0.25 * np.random.randn(1)[0]       
                 
     # Make a Table to store the PhotUtils Generated Guassian Components
+    model = Gaussian2D()
+    shape = (imsize, imsize)
+
+    # QTable of parameters
     source_table = QTable()
     source_table['amplitude'] = amplitude
     source_table['x_mean'] = x_true + x_sep + x_off
@@ -127,12 +131,14 @@ def GenerateRandomImage(iteration):
     source_table['x_stddev'] = [PSF['sigma_maj']] * n_comps
     source_table['y_stddev'] = [PSF['sigma_min']] * n_comps
     source_table['theta'] = [PSF['bpa'] + 0.5 * np.pi] * n_comps
-    sources = make_gaussian_sources_image((imsize, imsize), source_table)
+
+    # Generate sources
+    sources = make_model_image(shape, model, source_table, x_name='x_mean', y_name='y_mean')
 
     # Sum noise + source emision and save as fits for processing
     image = noise + sources
     hdu = fits.PrimaryHDU(data=image[np.newaxis, np.newaxis, :, :], header = header)
-    hdu.writeto(f'{images}/Simulated_Image_{iteration:04d}.fits', overwrite=True)
+    hdu.writeto(f'{images}/Simulated_Image_Flat_{iteration:04d}.fits', overwrite=True)
 
     return x_off, y_off
 
@@ -158,8 +164,8 @@ def main():
     # Feel free to modify the Global paramaters
     imsize  = 3500 # Image size (square)
     n_image = 100  # Number of images   
-    n_lowsnr_comps = 0 # Supliment low-SNR sources
-    n_comps = 300
+    n_lowsnr_comps = 100 # Supliment low-SNR sources
+    n_comps = 500
     A = 0.85 
     B = 0.02
     per_epoch = True # Global offset in each epoch
@@ -189,10 +195,8 @@ def main():
 
     # Save the expected values to a dictionary
     expected = {'A':A, 'B':B, 'per_epoch':per_epoch, 'ra_offset':x_offset_asec, 'dec_offset':y_offset_asec}     
-    with open('../results/expected_values.json', 'w') as j:
+    with open('../expected_values.json', 'w') as j:
         json.dump(expected, j, indent = 4)  
-
-    print(np.amin(amplitude))
 
     return 0
 

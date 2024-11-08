@@ -10,6 +10,8 @@ def main():
     results = scripts.replace('test_suite', 'results')
     plots    = scripts.replace('test_suite', 'plots')
 
+    print(files)
+
     # Read in the configuration file
     cfg = configparser.ConfigParser()
     cfg.read(f'{scripts}/config.ini')

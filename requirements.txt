@@ -1,8 +1,8 @@
-The current version was designed for Python 3.8.10 but should be fairly robust. The main python packages are:
+The current version was designed for Python 3.12.3 but should be fairly robust. The main python packages are:
 
-astropy==5.1
-emcee==3.1.2
-bdsf==1.10.2
-numpy==1.23.1
-scipy==1.9.0
-
+astropy==6.1.4
+emcee==3.1.6
+bdsf==1.11.1
+numpy==1.26.4
+scipy==1.14.1
+photutils==2.0.2

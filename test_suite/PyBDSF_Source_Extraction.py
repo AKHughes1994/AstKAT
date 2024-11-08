@@ -93,17 +93,31 @@ def main():
 
     msg('Extracting: Running PyBDSF')    
 
-'''
     # Run each image through PyBDSF
-    for image_name, obs_isot in zip(image_names[6:],obs_isots[6:]): #All images
+    for image_name, obs_isot in zip(image_names[:],obs_isots[:]): #All images
         msg(f'Extracting: {obs_isot}')
+
+        # Check if its flat noise images
+        if '_Flat_' in image_name:
+            rms_map = False
+            rms_value = 1.0
+            thresh_isl = 1.0
+            minpix_isl = 3.0
+        else:
+            rms_map = None
+            rms_value = None
+            thresh_isl = 3.0
+            minpix_isl = None
 
         # PyBDSF run
         img = bdsf.process_image(image_name,
-                            thresh_pix=snr_threshold,
-                            fix_to_beam=fix_to_beam, 
-                            group_by_isl = True)
-                            #minpix_isl=5.0)
+                            thresh_pix = snr_threshold,
+                            thresh_isl = thresh_isl,
+                            fix_to_beam = fix_to_beam, 
+                            group_by_isl = True,
+                            rms_map = rms_map,
+                            rms_value = rms_value,
+                            minpix_isl = minpix_isl)
                             #rms_box=(300,100))
                             #trim_box=(7750,8250,7750,8250))
 
@@ -112,6 +126,6 @@ def main():
                                     catalog_type=output_file_type, 
                                     outfile = f'{files}/total_{obs_isot}_{target_name}.fits', 
                                     clobber=True)
-'''
+
 if __name__ in "__main__":
     main()

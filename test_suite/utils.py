@@ -33,7 +33,7 @@ from scipy.special import gamma
 from scipy.signal import fftconvolve
 from scipy.stats import (rayleigh, truncnorm, expon)
 
-from photutils.datasets import (make_gaussian_sources_image, make_noise_image)
+from photutils.datasets import (make_model_image, make_model_params, make_noise_image)
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #
@@ -436,8 +436,8 @@ def MCMC(data, plot_prefix):
     def log_prior(p): 
         A, B =p[0], p[1]
         prior = 0.0
-        prior += ss.uniform.logpdf(A,loc=0.0,scale=2.0)
-        prior += ss.uniform.logpdf(B,loc=0.0,scale=2.0)
+        prior += ss.uniform.logpdf(A,loc=0.0,scale=10.0)
+        prior += ss.uniform.logpdf(B,loc=0.0,scale=10.0)
         
         if np.isnan(prior):
             return(-np.inf)
@@ -550,7 +550,7 @@ def PlotResults(data0, fit0, data = None, fit = None, plot_prefix = 'Fit', ylim 
     # Plot the data + MCMC model
     ax.set_yscale('log')
     ax.set_xscale('log')
-    ax.set_ylabel('Relative Astrometric Error ($\hat{\sigma}_r$)',fontfamily='serif',fontsize=15)
+    ax.set_ylabel(r'Relative Astrometric Error ($\hat{\sigma}_r$)',fontfamily='serif',fontsize=15)
     ax.set_xlabel('(S/N)$_{med}$', fontfamily='serif', fontsize=15)
     ax.legend(framealpha=1.0, fontsize=15, prop={'family':'serif'}).set_zorder(10000000)
 

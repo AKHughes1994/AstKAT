@@ -114,19 +114,25 @@ def GenerateRandomImage(iteration):
 
 
     # Make a Table to store the PhotUtils Generated Guassian Components
+    model = Gaussian2D()
+    shape = (imsize, imsize)
+
+    # QTable of parameters
     source_table = QTable()
     source_table['amplitude'] = amplitude
-    source_table['x_mean'] = x_true + x_sep
-    source_table['y_mean'] = y_true - y_sep
+    source_table['x_mean'] = x_true + x_sep + x_off
+    source_table['y_mean'] = y_true - y_sep + y_off
     source_table['x_stddev'] = [PSF['sigma_maj']] * n_comps
     source_table['y_stddev'] = [PSF['sigma_min']] * n_comps
     source_table['theta'] = [PSF['bpa'] + 0.5 * np.pi] * n_comps
-    sources = make_gaussian_sources_image((imsize, imsize), source_table)
+
+    # Generate sources
+    sources = make_model_image(shape, model, source_table, x_name='x_mean', y_name='y_mean')
 
     # Sum noise + source emision and save as fits for processing
     image = noise + sources
     hdu = fits.PrimaryHDU(data=image[np.newaxis, np.newaxis, :, :], header = header)
-    hdu.writeto(f'{images}/Simulated_Image_{iteration:04d}.fits', overwrite=True)
+    hdu.writeto(f'{images}/Simulated_Image_Guassian_{iteration:04d}.fits', overwrite=True)
 
 def main():
 
@@ -164,6 +170,11 @@ def main():
     for k in range(n_image):
         msg(f'Simulating image {k:04d}')
         GenerateRandomImage(iteration = k)
+
+    # Save the expected values to a dictionary
+    expected = {'A':A, 'B':B, 'per_epoch':per_epoch, 'ra_offset':x_offset_asec, 'dec_offset':y_offset_asec}     
+    with open('../expected_values.json', 'w') as j:
+        json.dump(expected, j, indent = 4)  
 
     return 0
 
