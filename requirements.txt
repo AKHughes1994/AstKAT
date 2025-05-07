@@ -6,3 +6,4 @@ bdsf==1.11.1
 numpy==1.26.4
 scipy==1.14.1
 photutils==2.0.2
+matplotlib==3.10.1
