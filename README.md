@@ -1,5 +1,11 @@
 # AstKAT
 
+---
+
+### Don't use this as of July 25, 2025: 
+
+Fixing some bugs
+
 --- 
 
 ### What is this?
