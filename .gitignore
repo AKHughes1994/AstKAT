@@ -1,0 +1,13 @@
+__pycache__/
+*.egg-info/
+build/
+dist/
+
+# Project products, when running AstKAT inside the repo
+astkat_files/
+pybdsf_files/
+results/
+plots/
+logs/
+images/
+sim_target/

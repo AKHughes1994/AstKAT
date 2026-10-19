@@ -1,9 +1,0 @@
-The current version was designed for Python 3.12.3 but should be fairly robust. The main python packages are:
-
-astropy==6.1.4
-emcee==3.1.6
-bdsf==1.11.1
-numpy==1.26.4
-scipy==1.14.1
-photutils==2.0.2
-matplotlib==3.10.1
