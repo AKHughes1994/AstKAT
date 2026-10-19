@@ -185,7 +185,7 @@ def create_project_config(name, deep_image, stack_image, image_dir, rms=False,
             'fit_translations': True,               # False absorbs epoch shifts into the noise (very conservative)
             'enable_systematic_floor': True,        # fit the floor B
             'systematic_floor_as_fraction': True,   # True: B as a fraction of the beam; False: B in arcsec
-            'snr_term': 'power',                   # SNR term of the position error, A the error at SNR_0:
+            'snr_term': 'fixed',                    # SNR term of the position error, A the error at SNR_0:
                                                     # ... fixed   A SNR_0 / SNR, SNR_0 = 1 (textbook)
                                                     # ... power   A (SNR / SNR_0)^-beta
                                                     # ... broken  A (SNR_0 / SNR) [(1 + SNR_b / SNR) / (1 + SNR_b / SNR_0)]^gamma,

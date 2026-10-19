@@ -77,7 +77,11 @@ flux rms ra dec bmaj bmin bpa time
 - `PYBDSF.snr_threshold`: the detection threshold.
 - `THRESHOLDS.match_threshold`: the cross-matching radius, as a fraction of the beam.
 - `THRESHOLDS.epoch_min`: the number of epochs a source must appear in to be used.
-- `MCMC.snr_term`: the shape of the position error against SNR (`fixed`, `power` or `broken`).
+- `MCMC.snr_term`: how the position error depends on SNR. The default, `fixed`, is the textbook error, which falls as A / SNR. Two more flexible forms are available when the data need them:
+  - `power`, A SNR^−β, fits the slope β.
+  - `broken` follows 1 / SNR above a fitted break SNR and lets the slope change below it.
+
+  A full description of the noise model and the SNR terms is coming soon in a separate document.
 - `MCMC.correct_differential_aberration`: on by default for real data.
 
 The defaults assume MeerKAT. For another telescope, change `MCMC.observatory_location`.
@@ -104,4 +108,19 @@ astkat simulate -h                             # every option: injected errors, 
 mkdir sim && cd sim && bash /path/to/examples/run_simulation.sh
 ```
 
-Compare `results/target_target_trajectory.csv` with the truth in `sim_target/target_trajectory_truth.csv`.
+### Comparing fitted and injected values
+
+On simulated data, AstKAT finds the simulator's truth files on its own and compares them with what it fitted. There's nothing extra to run. The injected values appear in these plots, as dashed lines or grey open squares:
+
+| Plot (`plots/`) | Fitted against injected |
+|---|---|
+| `fit_corner`, `fit_chains` | Noise-model parameters (A, B, outlier fraction, flux errors, ...) |
+| `fit_flux_scales` | Flux scale of each epoch |
+| `offsets_truth` | Translation of each epoch, with χ = (fitted − injected) / σ |
+| `offsets_truth_sources` | Source positions and peak flux densities against SNR |
+| `target_<name>` | Corrected target track against the true track |
+
+The same comparison appears as numbers:
+- the `truth` column in `results/fit_summary.txt`;
+- `results/offsets_summary.txt`;
+- `results/target_<name>_summary.txt`.
