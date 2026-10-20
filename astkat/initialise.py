@@ -144,9 +144,12 @@ def create_project_config(name, deep_image, stack_image, image_dir, rms=False,
             'flux_threshold': 0.15,                 # point-like if the median |total flux / peak flux - 1| is below this
             'size_threshold': 0.15,                 # ... and the median |size / beam - 1| on both axes is below this
             'single_fraction': 0.5,                 # least fraction of a source's detections with PyBDSF S_Code S
-            'snr_threshold': 4.0,                   # least SNR of a deep-catalogue source; the deep sources are the
+            'ambiguous_fraction': 0.1,              # most epochs (as a share of those with a match) a source may be
+                                                    # ... ambiguous or blended (S_Code A); more is a blended pair
+            'snr_threshold': 7.0,                   # least SNR of a deep-catalogue source; the deep sources are the
                                                     # ... reference list, so this keeps spurious ones out
-            'match_threshold': 0.75,                # cross-matching radius as a fraction of BMAJ
+            'match_threshold': 0.75,                # cross-matching ellipse, semi-axes this times each epoch's BMAJ
+                                                    # ... and BMIN (0.75: 1.5 times the beam)
             'ref_index': 0,                         # reference epoch when there is no deep image
             'epoch_min': 5,                         # a source must be detected in at least this many epochs
             'epoch_fraction': 0.0,                  # ... and in at least this share of all epochs
@@ -203,6 +206,11 @@ def create_project_config(name, deep_image, stack_image, image_dir, rms=False,
             'flux_censor_snr': 5.0,                 # peaks below this many rms count as censored; at least 0.5
                                                     # ... above PYBDSF.snr_threshold, so detection there is complete
             'detection_floor': 0.01,                # chance a source is missed for reasons other than its flux density
+            'detection_censor_snr': round(PYBDSF_SNR_THRESHOLD - 0.2, 2),
+                                                    # detection as a cut on the fitted peak, in rms: PyBDSF's
+                                                    # ... threshold less the brightest pixel's ~0.2 rms excess over
+                                                    # ... the fitted peak; detections below flux_censor_snr lie between
+                                                    # ... it and flux_censor_snr, non-detections below it
             'fit_flux_systematic': True,            # fit each epoch's flux scale g_e (a gain error shared by its
                                                     # ... sources), spread f_sys; False: every g_e = 0
             'fit_flux_fractional': True,            # fit a fractional peak error f_frac per detection, not shared
@@ -223,13 +231,15 @@ def create_project_config(name, deep_image, stack_image, image_dir, rms=False,
             'alpha': [-1.0, 2.0],                   # beam-shape exponent, uniform, starts at 1
             'outlier_fraction': [0.0, 0.05],        # Beta(a, b) stretched over [min, max]; max < 0.5 stops swaps
             'outlier_fraction_beta': [2.0, 8.0],    # ... [a, b]: zero density at 0, mode 0.006, mean 0.01
-            'outlier_scale': [100.0, 1000.0],           # outlier width over inlier width, log-uniform
-            'peak_noise': [0.5, 3.0],               # noise on a fitted peak over the rms, uniform; 1 = rms alone
-            'flux_systematic': [0.0, 0.2],          # spread f_sys of the epoch flux scales, uniform, starts at 0.02
-            'flux_fractional': [0.0, 0.1],          # per-detection fractional peak error f_frac, uniform, starts
-                                                    # ... at 0.01
-            'source_flux': [0.1, 2.0],              # true peak flux density over its median detected value,
-                                                    # ... uniform; asymmetric as detection only biases it high
+            'outlier_scale': [4.0, 20.0],           # outlier width over inlier width, log-uniform
+            'peak_noise': 0.5,                      # noise k on a fitted peak over the rms: log-normal sigma about
+                                                    # ... 1 (rms alone); starts at the k matching.py measures
+            'flux_systematic': 0.05,                # spread f_sys of the epoch flux scales: half-normal scale,
+                                                    # ... starts at 0.02
+            'flux_fractional': 0.03,                # per-detection fractional peak error f_frac: half-normal scale,
+                                                    # ... starts at 0.01
+            'source_flux': 1.0,                     # true peak flux density: log-normal sigma in ln S about its
+                                                    # ... median detected value
             'sigma_tau': 0.5,                       # epoch translations: half-normal scale of their spread, arcsec
             'position_scale': 10.0,                 # true positions: normal about the median, this many errors on
                                                     # ... the median wide, at least one pixel

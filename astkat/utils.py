@@ -37,8 +37,11 @@ CATALOG_COLUMNS = ('ra_deg', 'dec_deg', 'peak_flux_Jy', 'rms_Jy', 'snr',
                    'flux_ratio', 'maj_ratio', 'min_ratio', 's_code')
 
 # PyBDSF S_Code: S one Gaussian alone in its island, C one Gaussian in an island shared with
-# other sources, M several Gaussians.
-S_CODES = ('S', 'C', 'M')
+# other sources, M several Gaussians. A is set by matching.py: an epoch where several sources
+# claimed the reference source, so none was kept, or where it was blended with a neighbour that took
+# the source inside its ellipse; every other column is NaN, and it is not observed.
+S_CODES = ('S', 'C', 'M', 'A')
+AMBIGUOUS = S_CODES.index('A')
 
 # PyBDSF thresh_pix for the epoch images, in sigma: the default PYBDSF.snr_threshold, and the
 # detection threshold of simulate.py's catalogue mode.
@@ -371,6 +374,46 @@ def load_system_resources(files_dir='astkat_files'):
 # ============================================================================
 # SPHERICAL POSITION HELPERS
 # ============================================================================
+
+ARCSEC_PER_RAD = np.degrees(1.0) * 3600.0
+
+
+def tangent_plane_arcsec(ra_deg, dec_deg, phase_centre):
+    """Orthographic (RA, Dec) offsets from the phase centre in arcsec, shape (n, 2)."""
+    a0, d0 = phase_centre.ra.rad, phase_centre.dec.rad
+    e_ra = np.array([-np.sin(a0), np.cos(a0), 0.0])
+    e_dec = np.array([-np.sin(d0) * np.cos(a0), -np.sin(d0) * np.sin(a0), np.cos(d0)])
+    ra, dec = np.radians(ra_deg), np.radians(dec_deg)
+    n = np.array([np.cos(dec) * np.cos(ra), np.cos(dec) * np.sin(ra), np.sin(dec)])
+    return np.column_stack([e_ra @ n, e_dec @ n]) * ARCSEC_PER_RAD
+
+
+def beam_frame(xy, bmaj_deg, bmin_deg, bpa_deg):
+    """
+    Tangent-plane positions in beam units: along the major axis over BMAJ and along the minor axis over BMIN.
+
+    BPA is East of North, so the major axis points along (sin BPA, cos BPA)
+    and the minor axis along (-cos BPA, sin BPA), as in fit.epoch_beams.
+    Distances in this frame are separations in units of the FWHM axes; a
+    distance of at most d is the beam's FWHM ellipse scaled by 2 d (d = 0.75,
+    1.5 times the beam).
+
+    Parameters
+    ----------
+    xy : ndarray, shape (n, 2)
+        (RA, Dec) offsets, arcsec (see tangent_plane_arcsec).
+    bmaj_deg, bmin_deg, bpa_deg : float
+        The beam.
+
+    Returns
+    -------
+    ndarray, shape (n, 2)
+    """
+    pa = np.radians(bpa_deg)
+    major = xy @ np.array([np.sin(pa), np.cos(pa)]) / (bmaj_deg * 3600.0)
+    minor = xy @ np.array([-np.cos(pa), np.sin(pa)]) / (bmin_deg * 3600.0)
+    return np.column_stack([major, minor])
+
 
 def nan_average(data, weights=None, return_error=False, axis=0):
     """

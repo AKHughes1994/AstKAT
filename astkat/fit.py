@@ -46,15 +46,17 @@ from pytensor.graph.basic import Variable
 from scipy.stats import chi2 as chi2_distribution, norm
 
 try:
-    from .utils import (msg, title, parse_phase_center, column_index, CATALOG_COLUMNS, S_CODES, epoch_frequencies,
-                        frequency_bands, DEFAULT_SEED,
+    from .utils import (msg, title, parse_phase_center, column_index, CATALOG_COLUMNS, S_CODES, AMBIGUOUS,
+                        epoch_frequencies, frequency_bands, DEFAULT_SEED,
                         apply_aberration_correction_from_config, load_epoch_times, is_simulated,
-                        aberration_scale, observatory_location, SIMULATION_TRUTH_FILE)
+                        aberration_scale, observatory_location, SIMULATION_TRUTH_FILE, ARCSEC_PER_RAD,
+                        tangent_plane_arcsec)
 except ImportError:
-    from utils import (msg, title, parse_phase_center, column_index, CATALOG_COLUMNS, S_CODES, epoch_frequencies,
-                       frequency_bands, DEFAULT_SEED,
+    from utils import (msg, title, parse_phase_center, column_index, CATALOG_COLUMNS, S_CODES, AMBIGUOUS,
+                       epoch_frequencies, frequency_bands, DEFAULT_SEED,
                        apply_aberration_correction_from_config, load_epoch_times, is_simulated,
-                       aberration_scale, observatory_location, SIMULATION_TRUTH_FILE)
+                       aberration_scale, observatory_location, SIMULATION_TRUTH_FILE, ARCSEC_PER_RAD,
+                       tangent_plane_arcsec)
 
 
 CONFIG_FILE = Path('astkat_files') / 'astkat.yaml'
@@ -77,18 +79,20 @@ SCALAR_PARAMETERS = ('A', 'beta', 'snr_break', 'snr_gamma', 'B', 'alpha', 'outli
                      'sigma_tau', 'peak_noise', 'flux_systematic',
                      'flux_fractional')
 CENSOR_MARGIN = 0.5               # least gap between PyBDSF's threshold and the censoring threshold, in rms
+FLUX_OFFSET_FACTOR = 3.0         # a fitted flux this factor from its source's median detected peak is flagged
 SUMMARY_TEXT_FILE = 'fit_summary.txt'
 SNR_BIN_DEX = 0.1                # width of the SNR bins for the residual-versus-SNR diagnostic
 MIN_PER_SNR_BIN = 20             # sparser bins are merged with their higher-SNR neighbour
 HIST_BIN_DEX = 0.25              # broader SNR bins for the residual histograms ...
 MIN_PER_HIST_BIN = 100           # ... each holding at least this many measurements
 DRAW_CHUNK = 50                  # posterior draws processed together; bounds memory to ~ 50 x n_obs x 2 values
+BOOTSTRAP_DRAWS = 200            # resamples of the sources in each SNR bin for its scatter's error
+FEW_SOURCES = 5                  # SNR bins with fewer sources are flagged in the log
 MORPHOLOGY_GROUPS = ('S', 'C or M')   # PyBDSF S_Code: one Gaussian alone in its island, or not
 AFFINE_TERMS = ('scale', 'rotation', 'stretch', 'shear')
 MIN_SOURCES_AFFINE = 6           # inlier sources an epoch needs for its affine fit
 ELLIPSE_DISTORTION = 0.2         # largest distortion shown in the deformation-ellipse figure
 FWHM_TO_SIGMA = 1.0 / (2.0 * np.sqrt(2.0 * np.log(2.0)))
-ARCSEC_PER_RAD = np.degrees(1.0) * 3600.0
 
 
 # ============================================================================
@@ -196,6 +200,14 @@ def load_catalog(config, results_dir=RESULTS_DIR):
     return catalog, aberration_info
 
 
+def measured_peak_noise(config, results_dir=RESULTS_DIR):
+    """The peak noise k matching.py measured, saved with the matched catalogue; where the fit starts its own."""
+    with np.load(Path(results_dir) / f"matched_catalog_{config['BOOKKEEPING']['project_name']}.npz") as npz:
+        if 'peak_noise' not in npz:
+            raise KeyError("The matched catalogue has no measured peak noise; run matching.py again")
+        return float(npz['peak_noise'])
+
+
 def select_epochs(catalog, mcmc):
     """
     Epochs to fit: the dominant frequency band and, optionally, no anomalous noise.
@@ -293,16 +305,6 @@ def pixel_size_arcsec(config, epochs, results_dir=RESULTS_DIR):
     return max(abs(header['CDELT1']), abs(header['CDELT2'])) * 3600.0
 
 
-def tangent_plane_arcsec(ra_deg, dec_deg, phase_centre):
-    """Orthographic (RA, Dec) offsets from the phase centre in arcsec, shape (n, 2)."""
-    a0, d0 = phase_centre.ra.rad, phase_centre.dec.rad
-    e_ra = np.array([-np.sin(a0), np.cos(a0), 0.0])
-    e_dec = np.array([-np.sin(d0) * np.cos(a0), -np.sin(d0) * np.sin(a0), np.cos(d0)])
-    ra, dec = np.radians(ra_deg), np.radians(dec_deg)
-    n = np.array([np.cos(dec) * np.cos(ra), np.cos(dec) * np.sin(ra), np.sin(dec)])
-    return np.column_stack([e_ra @ n, e_dec @ n]) * ARCSEC_PER_RAD
-
-
 def epoch_beams(catalog):
     """
     Beam of each epoch in the model's form.
@@ -373,7 +375,7 @@ def prepare_data(config, results_dir=RESULTS_DIR):
     # C and M detections (blended, or several Gaussians) have displaced centroids at every SNR. Left out,
     # they are not observed rather than missed, so the censoring never reads them as faint.
     code = catalog[:, :, column_index('s_code')]
-    left_out = (np.isfinite(code) & (code != S_CODES.index('S')) if mcmc['single_gaussian_only']
+    left_out = (np.isfinite(code) & (code != S_CODES.index('S')) & (code != AMBIGUOUS) if mcmc['single_gaussian_only']
                 else np.zeros(code.shape, dtype=bool))
 
     keep_sources = select_sources(catalog, mcmc, left_out)
@@ -391,7 +393,9 @@ def prepare_data(config, results_dir=RESULTS_DIR):
     detected = np.isfinite(ra) & np.isfinite(dec)
     valid = detected & ~left_out & np.isfinite(peak) & np.isfinite(rms)
     source, epoch = np.nonzero(valid)
-    missed_source, missed_epoch = np.nonzero(~detected)
+    # Ambiguous matches (S_Code A) are not observed: no position, and not a miss either.
+    ambiguous = catalog[:, :, column_index('s_code')] == AMBIGUOUS
+    missed_source, missed_epoch = np.nonzero(~detected & ~ambiguous)
 
     # Projection about the phase centre. Its small distortion (< 20 mas at 0.45 deg) is the
     # same in every epoch, so the fitted true positions absorb it.
@@ -419,17 +423,19 @@ def prepare_data(config, results_dir=RESULTS_DIR):
                    source_flux_median=flux_median,
                    epoch_rms=epoch_rms, missed_source=missed_source, missed_epoch=missed_epoch,
                    s_code=catalog[:, :, column_index('s_code')][valid].astype(int))
-    log_data_summary(data, int((detected & left_out).sum()), int((detected & ~left_out & ~valid).sum()))
+    log_data_summary(data, int((detected & left_out).sum()), int(ambiguous.sum()),
+                     int((detected & ~left_out & ~valid).sum()))
     return data, aberration_info
 
 
-def log_data_summary(data, n_left_out, n_unusable):
+def log_data_summary(data, n_left_out, n_ambiguous, n_unusable):
     """
     Log the size and ranges of the data going into the fit.
 
     Every source-epoch pair is accounted for: fitted detections, detections
-    left out (C or M, n_left_out) or without a peak or rms (n_unusable), both
-    not observed, and non-detections.
+    left out (C or M, n_left_out), ambiguous matches (A, n_ambiguous) and
+    detections without a peak or rms (n_unusable), all not observed, and
+    non-detections.
     """
     per_source = np.bincount(data.source, minlength=data.n_sources)
     per_epoch = np.bincount(data.epoch, minlength=data.n_epochs)
@@ -445,6 +451,8 @@ def log_data_summary(data, n_left_out, n_unusable):
     msg(f"  Fitted: {share(data.n_obs)} detections, {2 * data.n_obs} coordinates")
     if n_left_out:
         msg(f"  Left out (C or M): {share(n_left_out)}, not observed")
+    if n_ambiguous:
+        msg(f"  Ambiguous matches (A): {share(n_ambiguous)}, not observed")
     if n_unusable:
         msg(f"  No peak or rms: {share(n_unusable)}, not observed")
     msg(f"  Not detected: {share(len(data.missed_source))}, censored in the flux fit; "
@@ -533,7 +541,7 @@ def prior_bounds(data, priors, opts):
 
     Read from the PRIORS section of astkat.yaml as [min, max] pairs. An
     absolute B with a maximum of null is bounded by a tenth of the largest
-    beam FWHM.
+    beam FWHM. The flux terms have unbounded priors and no entry.
 
     Returns
     -------
@@ -557,12 +565,6 @@ def prior_bounds(data, priors, opts):
     if opts['outliers']:
         bounds['outlier_fraction'] = pair('outlier_fraction')
         bounds['outlier_scale'] = pair('outlier_scale')
-    if opts['fit_flux']:
-        bounds['peak_noise'] = pair('peak_noise')
-    if opts['fit_fsys']:
-        bounds['flux_systematic'] = pair('flux_systematic')
-    if opts['fit_ffrac']:
-        bounds['flux_fractional'] = pair('flux_fractional')
     return bounds
 
 
@@ -629,29 +631,31 @@ def build_priors(data, priors, opts):
     else:
         f, lam = pt.constant(0.0), pt.constant(1.0)
 
-    # True peak flux densities, uniform between PRIORS.source_flux times each source's median detected value, so
-    # the prior does not pull S wherever the peaks constrain it; the range reaches far below the median, because
-    # detection only biases that median high.
+    # The flux terms have smooth priors without hard bounds, so no chain can run off to a bound and stick there.
+    # True peak flux densities: log-normal about each source's median detected value, PRIORS.source_flux wide in
+    # ln S, so the peaks set S wherever they constrain it.
     if opts['fit_flux']:
-        low, high = (float(v) for v in priors['source_flux'])
         median = data.source_flux_median
-        flux = pm.Uniform('source_flux', lower=low * median, upper=high * median, shape=data.n_sources,
-                          initval=median)
-        # The fitted peak is noisier than the rms alone (position fitted too, correlated noise).
-        k = pm.Uniform('peak_noise', *bounds['peak_noise'], initval=1.0)
+        flux = pm.LogNormal('source_flux', mu=np.log(median), sigma=float(priors['source_flux']),
+                            shape=data.n_sources, initval=median)
+        # The fitted peak is noisier than the rms alone (position fitted too, correlated noise): log-normal about
+        # 1, starting at the k matching.py measured.
+        k = pm.LogNormal('peak_noise', mu=0.0, sigma=float(priors['peak_noise']), initval=opts['peak_noise_start'])
         # Each epoch's flux-scale (gain) error g_e multiplies its peaks and its rms alike, shared by every
         # source, so the SNR is S (1 + g_e) / rms. The scales sum to zero: the flux densities set the overall
-        # scale. Their spread is f_sys.
+        # scale. Their spread f_sys is half-normal; non-centred (unit scales times f_sys) so a small spread
+        # does not squeeze the sampler into a funnel.
         if opts['fit_fsys']:
-            fsys = pm.Uniform('flux_systematic', *bounds['flux_systematic'], initval=0.02)
-            gain = 1.0 + pm.ZeroSumNormal('flux_scale', sigma=fsys, shape=data.n_epochs)
+            fsys = pm.HalfNormal('flux_systematic', sigma=float(priors['flux_systematic']), initval=0.02)
+            unit = pm.ZeroSumNormal('flux_scale_unit', sigma=1.0, shape=data.n_epochs)
+            gain = 1.0 + pm.Deterministic('flux_scale', fsys * unit)
         else:
             gain = pt.ones(data.n_epochs)
         snr = flux[data.source] * gain[data.epoch] / data.rms
         # A smaller fractional error on each peak that the epoch's sources do not share (primary beam,
-        # direction-dependent calibration), added in quadrature to the peak noise.
-        ffrac = (pm.Uniform('flux_fractional', *bounds['flux_fractional'], initval=0.01) if opts['fit_ffrac']
-                 else pt.constant(0.0))
+        # direction-dependent calibration), added in quadrature to the peak noise; half-normal.
+        ffrac = (pm.HalfNormal('flux_fractional', sigma=float(priors['flux_fractional']), initval=0.01)
+                 if opts['fit_ffrac'] else pt.constant(0.0))
     else:
         flux, snr, k, gain, ffrac = None, data.snr, None, None, None
 
@@ -770,35 +774,50 @@ def add_likelihood(data, p, opts):
 
 def add_flux_likelihood(data, p, opts):
     """
-    Add the log-likelihood of the measured peak flux densities, censored at our own threshold T.
+    Add the log-likelihood of the peak flux densities, interval-censored between t and T.
 
     PyBDSF decides detection on its brightest pixel, not on the fitted peak,
-    so its selection is not a cut on the measured peak. The censoring is
-    therefore applied at T = MCMC.flux_censor_snr, at least CENSOR_MARGIN above
-    PyBDSF's threshold, where PyBDSF finds essentially every source: a
-    detection with peak at or above T times its rms measures S (1 + g_e), the
-    true value times the epoch's flux scale, with noise
-    sigma_p = sqrt((k rms)^2 + (f_frac S (1 + g_e))^2), k the fitted peak
-    noise and f_frac the per-detection fractional error; a detection below
-    it, and a non-detection, only say the source fell below T rms,
-    probability Phi((T rms - S (1 + g_e)) / sigma_p).
-    Positions of every detection still enter the astrometric likelihood. A chance
-    MCMC.detection_floor of being missed for any other reason keeps one odd
-    non-detection from dragging a bright source down.
+    so only peaks at or above T = MCMC.flux_censor_snr rms, at least
+    CENSOR_MARGIN above PyBDSF's threshold where it finds essentially every
+    source, are used as measured. Below T each epoch is censored, with
+    detection approximated as a cut at t = MCMC.detection_censor_snr rms on
+    the fitted peak (PyBDSF's threshold less the brightest pixel's excess
+    over the fitted peak). With S' = S (1 + g_e), the true value times the
+    epoch's flux scale, and sigma_p = sqrt((k rms)^2 + (f_frac S')^2):
+        measured, p >= T rms      N(p; S', sigma_p)
+        detected, p < T rms       Phi((T rms - S') / sigma_p) - Phi((t rms - S') / sigma_p)
+        not detected              Phi((t rms - S') / sigma_p)
+    so a faint detection bounds S from below as well as above. Positions of
+    every detection still enter the astrometric likelihood. A chance
+    MCMC.detection_floor of either censored outcome for any other reason
+    (a failed fit, a lost match) keeps one odd epoch from dragging S.
     """
     threshold, floor = opts['detection']
+    detect = opts['detect_threshold']
     flux, k, gain, ffrac = p['flux'], p['k'], p['gain'], p['ffrac']
     measured = data.peak >= threshold * data.rms
     true = flux[data.source[measured]] * gain[data.epoch[measured]]
     sigma = pt.sqrt((k * data.rms[measured]) ** 2 + (ffrac * true) ** 2)
     pm.Potential('flux_detected', pt.sum(-0.5 * ((data.peak[measured] - true) / sigma) ** 2 - pt.log(sigma)))
 
-    # Faint detections and non-detections alike: below T in that epoch.
-    below_source = np.concatenate([data.source[~measured], data.missed_source])
-    below_epoch = np.concatenate([data.epoch[~measured], data.missed_epoch])
-    rms = np.concatenate([data.rms[~measured], data.epoch_rms[data.missed_epoch]])
-    true = flux[below_source] * gain[below_epoch]
-    z = (threshold * rms - true) / pt.sqrt((k * rms) ** 2 + (ffrac * true) ** 2)
+    def upper_tail(z):
+        """1 - Phi(z), accurate far into the tail."""
+        return 0.5 * pt.erfc(z / np.sqrt(2.0))
+
+    # Faint detections: between t and T in that epoch. The difference of tails is taken on the side away from
+    # 1, so it stays accurate when S lies far below t.
+    rms = data.rms[~measured]
+    true = flux[data.source[~measured]] * gain[data.epoch[~measured]]
+    sigma = pt.sqrt((k * rms) ** 2 + (ffrac * true) ** 2)
+    z_low, z_high = (detect * rms - true) / sigma, (threshold * rms - true) / sigma
+    between = pt.switch(z_low > 0, upper_tail(z_low) - upper_tail(z_high), upper_tail(-z_high) - upper_tail(-z_low))
+    log_between = pt.log(pt.maximum(between, 1e-300))
+    pm.Potential('flux_faint', pt.sum(pt.logaddexp(np.log1p(-floor) + log_between, np.log(floor))))
+
+    # Non-detections: below t in that epoch.
+    rms = data.epoch_rms[data.missed_epoch]
+    true = flux[data.missed_source] * gain[data.missed_epoch]
+    z = (detect * rms - true) / pt.sqrt((k * rms) ** 2 + (ffrac * true) ** 2)
     log_below = pm.logcdf(pm.Normal.dist(0.0, 1.0), z)
     pm.Potential('flux_missed', pt.sum(pt.logaddexp(np.log1p(-floor) + log_below, np.log(floor))))
 
@@ -818,6 +837,11 @@ def build_model(data, config):
     opts = model_options(mcmc)
     opts['bounds'] = prior_bounds(data, config['PRIORS'], opts)
     opts['detection'] = (float(mcmc['flux_censor_snr']), float(mcmc['detection_floor']))
+    opts['detect_threshold'] = float(mcmc['detection_censor_snr'])
+    if opts['fit_flux']:
+        opts['peak_noise_start'] = measured_peak_noise(config)
+    if opts['fit_flux'] and opts['detect_threshold'] >= opts['detection'][0]:
+        raise ValueError("MCMC.detection_censor_snr must lie below MCMC.flux_censor_snr")
     if opts['fit_flux'] and opts['detection'][0] < float(config['PYBDSF']['snr_threshold']) + CENSOR_MARGIN:
         raise ValueError(f"MCMC.flux_censor_snr must lie at least {CENSOR_MARGIN} above PYBDSF.snr_threshold, "
                          f"so PyBDSF detects every source whose peak passes it")
@@ -840,8 +864,9 @@ def log_model_summary(model, data, opts):
     point = model.initial_point()
     sizes = {rv.name: int(point[model.rvs_to_values[rv].name].size) for rv in model.free_RVs}
     n_pos, n_tau, n_flux = sizes['delta'], sizes.get('tau', 0), sizes.get('source_flux', 0)
-    n_scale = sizes.get('flux_scale', 0)
-    astro = [SCALAR_NAMES[n] for n in sizes if n not in ('delta', 'tau', 'source_flux', 'flux_scale') + FLUX_SCALARS]
+    n_scale = sizes.get('flux_scale_unit', 0)
+    astro = [SCALAR_NAMES[n] for n in sizes
+             if n not in ('delta', 'tau', 'source_flux', 'flux_scale_unit') + FLUX_SCALARS]
     flux = [SCALAR_NAMES[n] for n in sizes if n in FLUX_SCALARS]
     n_coords, n_astro = 2 * data.n_obs, n_pos + n_tau + len(astro)
 
@@ -864,8 +889,9 @@ def log_model_summary(model, data, opts):
     msg(f"  Flux: {n_flux} true peaks, "
         + (f"{n_scale} epoch flux scales ({data.n_epochs} summing to zero), " if n_scale else "")
         + f"{len(flux)} scalars ({', '.join(flux)})")
-    msg(f"    {n_measured} peaks at or above {threshold:g} rms measured, {n_faint + len(data.missed_source)} "
-        f"censored ({n_faint} fainter detections, {len(data.missed_source)} non-detections), floor {floor:g}")
+    msg(f"    {n_measured} peaks at or above {threshold:g} rms measured; {n_faint} detections censored between "
+        f"{opts['detect_threshold']:g} and {threshold:g} rms; {len(data.missed_source)} non-detections censored "
+        f"below {opts['detect_threshold']:g} rms; floor {floor:g}")
     msg(f"  Degrees of freedom: astrometric {n_coords} - {n_astro} = {n_coords - n_astro}; "
         f"flux {n_measured} - {n_flux_free} = {n_measured - n_flux_free}")
 
@@ -946,34 +972,31 @@ def check_bounds(idata, bounds, fraction=0.01, margin=0.02):
     return flagged
 
 
-def check_flux_bounds(idata, data, priors, fraction=0.01, margin=0.02):
+def check_flux_offsets(idata, data, factor=FLUX_OFFSET_FACTOR):
     """
-    Sources whose flux density posterior presses against a bound of its prior.
+    Sources whose fitted flux density lies far from their median detected value.
 
-    As check_bounds, per source, with the margin a fraction of the source's
-    prior range. Pressing the lower bound means a faint
-    source wants to lie further below its median detected value than
-    PRIORS.source_flux allows.
+    Detection biases the median detected value high only near the
+    threshold, so a posterior median more than `factor` below it or above it
+    marks a source whose peaks the model cannot reconcile, often a blend.
 
     Returns
     -------
     dict
-        'lower' and 'upper': number of sources with more than `fraction` of
-        draws within `margin` of that bound.
+        'low' and 'high': number of sources whose posterior median lies more
+        than `factor` below or above their median detected value.
     """
     if 'source_flux' not in idata.posterior:
         return {}
-    flux = idata.posterior['source_flux'].values.reshape(-1, data.n_sources)
-    low, high = (float(v) * data.source_flux_median for v in priors['source_flux'])
-    width = margin * (high - low)
-    counts = {'lower': int(np.sum(np.mean(flux < low + width, axis=0) > fraction)),
-              'upper': int(np.sum(np.mean(flux > high - width, axis=0) > fraction))}
+    ratio = np.median(idata.posterior['source_flux'].values.reshape(-1, data.n_sources), axis=0) \
+        / data.source_flux_median
+    counts = {'low': int(np.sum(ratio < 1.0 / factor)), 'high': int(np.sum(ratio > factor))}
     for end, n in counts.items():
         if n:
-            msg(f"  WARNING: {n} of {data.n_sources} source flux densities press against the {end} bound of "
-                f"PRIORS.source_flux")
+            msg(f"  WARNING: {n} of {data.n_sources} fitted source flux densities lie more than a factor {factor:g} "
+                f"{'below' if end == 'low' else 'above'} their median detected value")
     if not any(counts.values()):
-        msg("  No source flux density presses against a bound of its prior")
+        msg(f"  Every fitted source flux density lies within a factor {factor:g} of its median detected value")
     return counts
 
 
@@ -1160,13 +1183,21 @@ def realised_scatter(data, opts, idata, n_draws, snr_bin, inlier):
     absorb, so the realised scatter matches the model scatter without any
     correction, and every parameter's uncertainty (mu, tau, A, the SNR shape, B, alpha
     and the flux densities) is carried by the draws. Both are in beam units
-    with the draw's own alpha.
+    with the draw's own alpha. The whitened residuals, each over the draw's
+    own inlier sigma, are taken the same way.
 
     Returns
     -------
     observed, predicted : ndarray, shape (n_kept_draws, n_bins, 2)
         Realised rms of the inlier residuals and the model's rms for the same
         measurements, along the minor and major axes, one row per draw.
+    whitened : dict
+        Per draw and axis, the rms of the whitened inlier residuals overall
+        (std, (n_kept_draws, 2)) and per bin (axes, (n_kept_draws, n_bins, 2)),
+        and their Wasserstein distance to N(0, 1) (w1, (n_kept_draws,)); the
+        whitened residuals of every measurement about the first draw (sample,
+        (n_obs, 2)), and that draw's residuals in arcsec, inlier variances and
+        beam variances, each (n_obs, 2) (draw: residual, variance, beam).
     """
     _, _, mu, tau, scalars, flux, gain = thinned_posterior(idata, data, n_draws)
     n_bins = int(snr_bin.max()) + 1
@@ -1177,12 +1208,24 @@ def realised_scatter(data, opts, idata, n_draws, snr_bin, inlier):
 
     observed = np.empty((len(mu), n_bins, 2))
     predicted = np.empty((len(mu), n_bins, 2))
+    whitened = {'std': np.empty((len(mu), 2)), 'axes': np.empty((len(mu), n_bins, 2)), 'w1': np.empty(len(mu))}
     for chunk, r, v_min, v_maj, p in draw_chunks(data, opts, mu, tau, scalars, flux, gain):
         b_min, b_maj = beam_variances(data, p['alpha'], opts['fit_alpha'])
+        z, residual = np.empty(r.shape), np.empty(r.shape)
         for k, (u, v, b) in enumerate(((data.u_min, v_min, b_min), (data.u_maj, v_maj, b_maj))):
-            observed[chunk, :, k] = np.sqrt((np.sum(r * u[data.epoch], axis=2) ** 2 / b) @ mean_in_bin)
+            residual[..., k] = np.sum(r * u[data.epoch], axis=2)
+            observed[chunk, :, k] = np.sqrt((residual[..., k] ** 2 / b) @ mean_in_bin)
             predicted[chunk, :, k] = np.sqrt((v / b) @ mean_in_bin)
-    return observed, predicted
+            z[..., k] = residual[..., k] / np.sqrt(v)
+            whitened['axes'][chunk, :, k] = np.sqrt(z[..., k] ** 2 @ mean_in_bin)
+        whitened['std'][chunk] = np.sqrt(np.mean(z[:, inlier] ** 2, axis=1))
+        whitened['w1'][chunk] = [wasserstein_to_normal(z_draw[inlier]) for z_draw in z]
+        if chunk.start == 0:
+            whitened['sample'] = z[0]
+            beam = np.broadcast_to(np.stack([b_min, b_maj], axis=-1), r.shape)
+            whitened['draw'] = {'residual': residual[0], 'variance': np.stack([v_min[0], v_maj[0]], axis=-1),
+                                'beam': beam[0]}
+    return observed, predicted, whitened
 
 
 def loo_summary(log_like, thinned):
@@ -1311,24 +1354,18 @@ def snr_bins(snr, width_dex=SNR_BIN_DEX, min_count=MIN_PER_SNR_BIN):
     return index, edges
 
 
-def whitened_residuals(data, opts, point):
+def beam_axis_residuals(data, point):
     """
-    Residuals along the minor and major beam axes divided by the fitted inlier sigma.
-
-    For inliers these should follow N(0, 1) on both axes; a mismatch between
-    the two axes points at the beam shape of the noise (alpha).
+    Residuals x - mu - tau along the minor and major beam axes at a posterior point.
 
     Returns
     -------
-    residual : ndarray, shape (n_obs, 2)
-        Raw residuals (minor, major), arcsec.
-    whitened : ndarray, shape (n_obs, 2)
+    ndarray, shape (n_obs, 2)
+        Residuals (minor, major), arcsec.
     """
     r = data.x - point['mu'][data.source] - point['tau'].T[data.epoch]
-    residual = np.column_stack([np.sum(r * data.u_min[data.epoch], axis=1),
-                                np.sum(r * data.u_maj[data.epoch], axis=1)])
-    v_min, v_maj = noise_variances(data, point, opts)
-    return residual, residual / np.sqrt(np.column_stack([v_min, v_maj]))
+    return np.column_stack([np.sum(r * data.u_min[data.epoch], axis=1),
+                            np.sum(r * data.u_maj[data.epoch], axis=1)])
 
 
 def wasserstein_to_normal(z):
@@ -1387,7 +1424,10 @@ def set_error_inflation(opts, bins):
 
     With True it is the smallest factor that puts every SNR bin's realised
     scatter at or below the model: the largest binned ratio of realised to
-    predicted scatter (median over posterior draws), and at least 1. A number
+    predicted scatter (median over posterior draws), and at least 1. With
+    fitted flux densities only bins of fitted SNR at or above
+    MCMC.flux_censor_snr count, so a few faint bins, whose SNRs rest on
+    censored peaks alone, cannot set it. A number
     is used as given; False leaves 1. The fit and its diagnostics are
     unchanged; noise_variances applies the factor everywhere afterwards,
     so offsets.py and target.py inherit it through the saved options.
@@ -1402,7 +1442,10 @@ def set_error_inflation(opts, bins):
     if setting is False:
         out = {'factor': 1.0, 'source': 'off', 'snr': None}
     elif setting is True:
-        k = int(np.argmax(bins['scatter_ratio']))
+        ratio = np.array(bins['scatter_ratio'], dtype=float)
+        if opts['fit_flux'] and np.any(bins['snr_median'] >= opts['detection'][0]):
+            ratio = np.where(bins['snr_median'] >= opts['detection'][0], ratio, -np.inf)
+        k = int(np.argmax(ratio))
         out = {'factor': float(max(1.0, bins['scatter_ratio'][k])), 'source': 'data',
                'snr': float(bins['snr_median'][k])}
         msg(f"Errors inflated x{out['factor']:.3f}: the largest binned realised over predicted scatter, "
@@ -1414,6 +1457,52 @@ def set_error_inflation(opts, bins):
     return out
 
 
+def bootstrap_scatter_error(values, source, masks, rng, n_boot=BOOTSTRAP_DRAWS):
+    """
+    Fractional error of each bin's rms scatter, from resampling its sources.
+
+    A bin's measurements are not independent draws: a few sources, each with
+    many epochs, can dominate it, and one clean or blended source more or
+    less moves its scatter far more than sqrt(n) suggests. Each bootstrap
+    resample redraws the bin's sources with replacement, keeping all of each
+    one's measurements. Never below the Gaussian 1 / sqrt(2n) per axis; a bin
+    of one source, with nothing to resample, gets an error equal to its scatter.
+
+    Parameters
+    ----------
+    values : ndarray, shape (n_obs, 2)
+        Scaled residuals along each axis.
+    masks : list of bool arrays, one per bin
+
+    Returns
+    -------
+    combined : ndarray, shape (n_bins,)
+        Fractional error of the scatter of both axes together.
+    axes : ndarray, shape (n_bins, 2)
+    n_sources : ndarray of int, shape (n_bins,)
+    """
+    combined, axes, n_sources = np.ones(len(masks)), np.ones((len(masks), 2)), np.zeros(len(masks), dtype=int)
+    for b, m in enumerate(masks):
+        ids, member = np.unique(source[m], return_inverse=True)
+        n_sources[b] = ids.size
+        if ids.size < 2:
+            continue
+        # Each source's sum of squares and count, so a resample is a weighted sum over sources.
+        squares = np.stack([np.bincount(member, values[m, k] ** 2) for k in range(2)], axis=1)
+        counts = np.bincount(member).astype(float)
+        picks = rng.integers(0, ids.size, (n_boot, ids.size))
+        n = counts[picks].sum(axis=1)
+        sum_axes = squares[picks].sum(axis=1)                               # (n_boot, 2)
+        rms_axes = np.sqrt(sum_axes / n[:, None])
+        rms = np.sqrt(sum_axes.sum(axis=1) / (2 * n))
+        point_axes = np.sqrt(squares.sum(axis=0) / counts.sum())
+        point = np.sqrt(squares.sum() / (2 * counts.sum()))
+        gaussian = 1.0 / np.sqrt(2.0 * counts.sum())
+        combined[b] = max(np.std(rms) / point, gaussian / np.sqrt(2.0))
+        axes[b] = np.maximum(np.std(rms_axes, axis=0) / point_axes, gaussian)
+    return combined, axes, n_sources
+
+
 def compute_diagnostics(data, opts, point, p_outlier, snr_bin, edges, realised, draws, n_draws):
     """
     Numbers behind the diagnostic figures, in beam units.
@@ -1421,54 +1510,66 @@ def compute_diagnostics(data, opts, point, p_outlier, snr_bin, edges, realised, 
     Residuals along each beam axis are divided by that axis's beam scale
     sqrt(v'), so A applies to every measurement alike whatever its beam. The
     binned comparison with the model uses realised, the scatter of the
-    residuals about each posterior draw (see realised_scatter); the
-    per-measurement residuals, the whitened residuals and the axis ratio are
-    taken at the posterior median.
+    residuals about each posterior draw (see realised_scatter), and so do
+    the whitened residuals, which for inliers should follow N(0, 1) on both
+    axes (a mismatch between the axes points at the beam shape of the noise,
+    alpha); the per-measurement residuals and the axis ratio are taken at
+    the posterior median.
 
     Returns
     -------
     dict
         residual (n_obs, 2) in arcsec (minor, major); scaled (n_obs, 2) and
-        radial (n_obs,) in beam units; whitened (n_obs, 2); inlier mask
-        (p_outlier < 0.5); whitened standard deviation per axis and
-        Wasserstein distance to N(0, 1); snr_bins with, per bin, the median
-        SNR, inlier count, the median over draws of the realised scatter
-        (both axes together and per axis) with its standard error, the
+        radial (n_obs,) in beam units; whitened (n_obs, 2), about one
+        posterior draw, and draw, that draw's residuals and variances (see
+        realised_scatter); inlier mask (p_outlier < 0.5); whitened inlier rms per
+        axis and Wasserstein distance to N(0, 1), medians over draws;
+        snr_bins with, per bin, the median
+        SNR, inlier and source counts, the median over draws of the realised
+        scatter (both axes together and per axis) with its error from
+        resampling the bin's sources (see bootstrap_scatter_error), the
         16th/50th/84th percentiles over draws of the model scatter (both axes
         together and per axis), chi = (realised - model) / standard error and
         the fraction model / realised - 1 in per cent with its error, both
         medians over draws, chi2 and dof (one per bin), and the whitened
-        standard deviation per axis with its standard error; axes, the observed
+        rms per axis, median over draws, with its standard error; axes, the observed
         minor/major scatter ratio in arcsec with its error, the model's
         ratio and the ratio of the beam itself; and the model curve.
     """
-    residual, whitened = whitened_residuals(data, opts, point)
-    observed_draws, predicted = realised
+    residual = beam_axis_residuals(data, point)
+    observed_draws, predicted, white = realised
+    whitened = white['sample']
     b_min, b_maj = beam_variances(data, point['alpha'], opts['fit_alpha'])
     scaled = residual / np.sqrt(np.column_stack([b_min, b_maj]))
     inlier = p_outlier < 0.5
-    w1 = wasserstein_to_normal(whitened[inlier])
-    std_minor, std_major = np.std(whitened[inlier, 0]), np.std(whitened[inlier, 1])
-    msg(f"  Whitened inlier residuals: std {std_minor:.3f} (minor axis), {std_major:.3f} (major axis), "
-        f"Wasserstein distance to N(0, 1) {w1:.4f}")
+    w1 = float(np.median(white['w1']))
+    std_minor, std_major = np.median(white['std'], axis=0)
+    msg(f"  Whitened inlier residuals about the posterior draws: rms {std_minor:.3f} (minor axis), "
+        f"{std_major:.3f} (major axis), Wasserstein distance to N(0, 1) {w1:.4f}")
 
     n_bins = len(edges) - 1
     in_bin = [(snr_bin == b) & inlier for b in range(n_bins)]
     n_inliers = np.array([m.sum() for m in in_bin])
-    n_safe = np.maximum(n_inliers, 1)
     # Realised and model scatter for both axes together, per draw; the points are their medians over draws.
     observed_combined = np.sqrt(np.mean(observed_draws ** 2, axis=2))
     combined = np.sqrt(np.mean(predicted ** 2, axis=2))
     observed = np.median(observed_combined, axis=0)
     observed_axes = np.median(observed_draws, axis=0)
-    whitened_axes = np.array([np.std(whitened[m], axis=0) for m in in_bin])
-    # Scatter from n offsets has a standard error of sigma / sqrt(2n) per axis and sigma / (2 sqrt(n)) for both.
+    whitened_axes = np.median(white['axes'], axis=0)
+    # Errors on the scatter come from resampling each bin's sources, not from its measurement count.
+    rng = np.random.default_rng(DEFAULT_SEED)
+    rel, rel_axes, n_sources = bootstrap_scatter_error(scaled, data.source, in_bin, rng)
+    _, rel_whitened, _ = bootstrap_scatter_error(whitened, data.source, in_bin, rng)
     bins = {'edges': edges, 'snr_median': np.array([np.median(data.snr[snr_bin == b]) for b in range(n_bins)]),
-            'n_inliers': n_inliers,
-            'observed_rms': observed, 'observed_rms_err': observed / (2.0 * np.sqrt(n_safe)),
-            'observed_axes': observed_axes, 'observed_axes_err': observed_axes / np.sqrt(2.0 * n_safe)[:, None],
-            'whitened_std_axes': whitened_axes,
-            'whitened_std_axes_err': whitened_axes / np.sqrt(2.0 * n_safe)[:, None]}
+            'n_inliers': n_inliers, 'n_sources': n_sources,
+            'observed_rms': observed, 'observed_rms_err': observed * rel,
+            'observed_axes': observed_axes, 'observed_axes_err': observed_axes * rel_axes,
+            'whitened_std_axes': whitened_axes, 'whitened_std_axes_err': whitened_axes * rel_whitened}
+    few = n_sources < FEW_SOURCES
+    msg(f"  Binned scatter errors from {BOOTSTRAP_DRAWS} resamples of each bin's sources; {n_bins} bins of "
+        f"{n_sources.min()} to {n_sources.max()} sources"
+        + (f"; fewer than {FEW_SOURCES} sources at SNR " + ", ".join(f"{s:.3g}" for s in bins['snr_median'][few])
+           if few.any() else ""))
     for q in (16, 50, 84):
         bins[f'predicted_rms_p{q}'] = np.percentile(combined, q, axis=0)
         bins[f'predicted_axes_p{q}'] = np.percentile(predicted, q, axis=0)
@@ -1495,22 +1596,23 @@ def compute_diagnostics(data, opts, point, p_outlier, snr_bin, edges, realised, 
         f"beam-shaped noise {axes['beam_ratio']:.3f}")
 
     return {'residual': residual, 'scaled': scaled, 'radial': np.hypot(scaled[:, 0], scaled[:, 1]),
-            'whitened': whitened, 'inlier': inlier,
+            'whitened': whitened, 'draw': white['draw'], 'inlier': inlier,
             'whitened_std_minor': float(std_minor), 'whitened_std_major': float(std_major),
             'wasserstein_to_normal': w1, 'snr_bins': bins, 'axes': axes,
             'model_curve': model_curve(data, opts, draws, n_draws)}
 
 
-def snr_histograms(data, opts, point, parameters, diag, width_dex=HIST_BIN_DEX, min_count=MIN_PER_HIST_BIN,
-                   n_grid=200):
+def snr_histograms(data, parameters, diag, width_dex=HIST_BIN_DEX, min_count=MIN_PER_HIST_BIN, n_grid=200):
     """
-    Residuals about the fitted true positions in broad SNR bins, with the distribution the model expects.
+    Residuals about one posterior draw in broad SNR bins, with the distribution the model expects.
 
-    Residuals x - mu - tau along each epoch's minor and major beam axes, all
-    measurements including outliers, both in beam units (over sqrt(v')) and in
-    mas. The model density in each bin is the fitted mixture, inlier normal
-    plus outlier normal lambda times wider, summed over the bin's
-    measurements at their own SNR and beam, at the posterior medians.
+    Residuals x - mu - tau along each epoch's minor and major beam axes about
+    one posterior draw (see realised_scatter), so they carry the full model
+    noise, all measurements including outliers, both in beam units (over
+    sqrt(v')) and in mas. The model density in each bin is the fitted
+    mixture, inlier normal with that draw's sigma plus outlier normal lambda
+    times wider, summed over the bin's measurements at their own SNR and
+    beam, with f and lambda at their posterior medians.
 
     Returns
     -------
@@ -1520,11 +1622,9 @@ def snr_histograms(data, opts, point, parameters, diag, width_dex=HIST_BIN_DEX, 
         and predicted (rms of the inlier model) standard deviations per axis.
     """
     index, edges = snr_bins(data.snr, width_dex, min_count)
-    v_min, v_maj = noise_variances(data, point, opts)
-    b_min, b_maj = beam_variances(data, point['alpha'], opts['fit_alpha'])
-    sigma = {'beam': np.sqrt(np.column_stack([v_min / b_min, v_maj / b_maj])),
-             'mas': np.sqrt(np.column_stack([v_min, v_maj])) * 1e3}
-    values = {'beam': diag['scaled'], 'mas': diag['residual'] * 1e3}
+    draw = diag['draw']
+    sigma = {'beam': np.sqrt(draw['variance'] / draw['beam']), 'mas': np.sqrt(draw['variance']) * 1e3}
+    values = {'beam': draw['residual'] / np.sqrt(draw['beam']), 'mas': draw['residual'] * 1e3}
     f = parameters['outlier_fraction']['median'] if 'outlier_fraction' in parameters else 0.0
     lam = parameters['outlier_scale']['median'] if 'outlier_scale' in parameters else 1.0
 
@@ -1592,8 +1692,9 @@ def morphology_split(data, diag, p_outlier, peaks, threshold, width_dex=HIST_BIN
 
     The groups are PyBDSF S_Code S (one Gaussian, alone in its island) and
     C or M (sharing an island, or several Gaussians). A whitened scatter near
-    1 means the noise model describes that group. Whitened residuals use the
-    inlier noise, all measurements included, so std reacts to tails and the
+    1 means the noise model describes that group. Whitened residuals are about
+    one posterior draw (see realised_scatter) over the inlier noise, all
+    measurements included, so std reacts to tails and the
     robust sd (1.4826 MAD) to the core alone. Computed only with
     MCMC.single_gaussian_only false, when C and M detections are fitted.
 
@@ -2244,9 +2345,9 @@ def write_summary_text(results, results_dir=RESULTS_DIR):
         f"{'Divergent transitions':<52}{conv['divergences']}",
         f"{'Draws within 2% of a prior bound':<52}"
         + (', '.join(f"{n} {v * 100:.1f}%" for n, v in conv['near_bound'].items()) or 'none'),
-        f"{'Source flux densities near a prior bound':<52}"
-        + (f"{conv['flux_near_bound']['lower']} lower, {conv['flux_near_bound']['upper']} upper"
-           if conv.get('flux_near_bound') else "not fitted"),
+        f"{f'Fitted fluxes beyond x{FLUX_OFFSET_FACTOR:g} of their median peak':<52}"
+        + (f"{conv['flux_offsets']['low']} below, {conv['flux_offsets']['high']} above"
+           if conv.get('flux_offsets') else "not fitted"),
         "",
         "Marginal posteriors",
         "-------------------",
@@ -2411,7 +2512,7 @@ def run_fit(config):
     msg("Convergence:")
     convergence = check_convergence(idata)
     convergence['near_bound'] = check_bounds(idata, opts['bounds'])
-    convergence['flux_near_bound'] = check_flux_bounds(idata, data, config['PRIORS'])
+    convergence['flux_offsets'] = check_flux_offsets(idata, data)
 
     # 4. Posterior summaries. Pointwise terms use a thinned set of draws to bound memory.
     msg("Parameters (median, 68% interval):")
@@ -2437,7 +2538,7 @@ def run_fit(config):
     realised = realised_scatter(data, opts, idata, n_draws, snr_bin, p_outlier < 0.5)
     diagnostics = compute_diagnostics(data, opts, point, p_outlier, snr_bin, edges, realised, draws, n_draws)
     diagnostics['affine'] = affine_diagnostics(data, opts, point, p_outlier, config, aberration_info)
-    diagnostics['snr_histograms'] = snr_histograms(data, opts, point, parameters, diagnostics)
+    diagnostics['snr_histograms'] = snr_histograms(data, parameters, diagnostics)
     diagnostics['peak_chi'] = peak_chi(data, parameters, flux, scale, opts['detection'][0])
     diagnostics['morphology'] = (None if mcmc['single_gaussian_only'] else
                                  morphology_split(data, diagnostics, p_outlier, diagnostics['peak_chi'],

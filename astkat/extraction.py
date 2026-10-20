@@ -26,9 +26,9 @@ from astropy.coordinates import Angle, SkyCoord
 from astropy.io import fits
 
 try:
-    from .utils import msg, title, remove_observation_properties_entries
+    from .utils import msg, title, remove_observation_properties_entries, is_simulated
 except ImportError:
-    from utils import msg, title, remove_observation_properties_entries
+    from utils import msg, title, remove_observation_properties_entries, is_simulated
 
 # PyBDSF's Gaussian fitter reports hitting its evaluation limit on some islands; harmless here.
 warnings.filterwarnings("ignore", message=r"Number of calls to function has reached maxfev",
@@ -225,7 +225,8 @@ def run_pybdsf(image_path, config, output_dir=CATALOG_DIR, overwrite=False, deep
     Uses the PYBDSF section of astkat.yaml. The deep image uses
     DEEP_SNR_THRESHOLD and DEEP_ISLAND_THRESHOLD instead. A fixed
     BOOKKEEPING.rms replaces PyBDSF's noise map (scaled by DEEP_RMS_FACTOR
-    for the deep image).
+    for the deep image); in a simulated project an epoch image's own NOISE
+    header, the unit rms times its flux scale, takes its place.
 
     Parameters
     ----------
@@ -261,7 +262,8 @@ def run_pybdsf(image_path, config, output_dir=CATALOG_DIR, overwrite=False, deep
     extra = dict(pybdsf.get('zargs') or {})
     rms = config['BOOKKEEPING'].get('rms', False)
     if rms is not False:
-        extra['rms_value'] = rms * DEEP_RMS_FACTOR if deep else rms
+        noise = None if deep or not is_simulated(config) else fits.getheader(image_path).get('NOISE')
+        extra['rms_value'] = rms * DEEP_RMS_FACTOR if deep else (float(noise) if noise is not None else rms)
         extra['rms_map'] = False
 
     msg(f"PyBDSF on {image_name}: thresh_pix={thresh_pix}, thresh_isl={thresh_isl}"

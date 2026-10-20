@@ -391,7 +391,8 @@ def run_simulation(args):
                   else correlated_noise(rng, args.image_size, beam, rms, not args.no_spatial_correlation))
         gain = 1.0 + flux_scale[e]
         image *= gain
-        rms = None if flat else rms * gain
+        # The epoch's rms scales with the gain; flat images record it in NOISE, which extraction.py reads.
+        rms = (field_rms if flat else rms) * gain
         header = fits_header(beam, centre, args.image_size, e, frequency, args.mode, args.cadence_days, rms)
         path = output_dir / f"{settings['prefix']}{e:04d}.fits"
         fits.PrimaryHDU(data=image[np.newaxis, np.newaxis].astype(np.float32), header=header).writeto(

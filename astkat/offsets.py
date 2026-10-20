@@ -25,12 +25,12 @@ from scipy.spatial import cKDTree
 from scipy.special import ndtr
 
 try:
-    from .utils import msg, title, parse_phase_center, column_index, S_CODES, DEFAULT_SEED
+    from .utils import msg, title, parse_phase_center, column_index, S_CODES, AMBIGUOUS, DEFAULT_SEED, beam_frame
     from .fit import (FitData, load_catalog, load_results, tangent_plane_arcsec, epoch_beams,
                       noise_variances, epoch_metadata, _vector_products, affine_diagnostics,
                       affine_summary_lines, FWHM_TO_SIGMA)
 except ImportError:
-    from utils import msg, title, parse_phase_center, column_index, S_CODES, DEFAULT_SEED
+    from utils import msg, title, parse_phase_center, column_index, S_CODES, AMBIGUOUS, DEFAULT_SEED, beam_frame
     from fit import (FitData, load_catalog, load_results, tangent_plane_arcsec, epoch_beams,
                      noise_variances, epoch_metadata, _vector_products, affine_diagnostics,
                      affine_summary_lines, FWHM_TO_SIGMA)
@@ -420,7 +420,8 @@ def compare_sources_with_truth(config, results, in_fit, offsets_path):
     -------
     dict or None
         For the matched sources: fit_index, true_index (row in
-        true_source_positions.csv) and catalog_sources, snr, diff
+        true_source_positions.csv) and catalog_sources, injected_snr (the
+        injected flux density over the median local rms), diff
         (n, 2), recovered minus injected RA and Dec in arcsec, sd (n, 2),
         chi = diff / sd, true_xy (n, 2) injected positions relative to the
         phase centre in arcsec, injected_flux, flux_ratio (recovered over
@@ -465,8 +466,13 @@ def compare_sources_with_truth(config, results, in_fit, offsets_path):
     scale = (float(np.mean(1.0 + offsets_table['flux_scale'][in_fit]))
              if 'flux_scale' in offsets_table.dtype.names else 1.0)
 
+    # The injected SNR, so a source's place on the axis does not depend on its own fit: the injected value on
+    # the fitted epochs' mean scale over the same median local rms the fitted SNR uses (fitted flux / fitted SNR).
+    injected_snr = injected * scale * pos['snr'][matched] / flux
+
     chi = diff / sd
-    out = {'fit_index': matched, 'true_index': nearest[matched], 'catalog_sources': pos['catalog_sources'][matched], 'snr': pos['snr'][matched],
+    out = {'fit_index': matched, 'true_index': nearest[matched], 'catalog_sources': pos['catalog_sources'][matched],
+           'injected_snr': injected_snr,
            'diff': diff, 'sd': sd, 'chi': chi, 'true_xy': true_xy[nearest[matched]], 'injected_flux': injected,
            'flux_ratio': flux / injected, 'flux_ratio_err': flux_err / injected, 'flux_chi': flux_chi,
            'n_fitted': len(pos['median']), 'rms_mas': np.sqrt(np.mean(diff ** 2, axis=0)) * 1e3,
@@ -505,7 +511,7 @@ def completeness_with_truth(config, results, in_fit, sources):
 
     Each miss is traced back through the pipeline at the source's injected
     position in that epoch (true position plus the epoch's injected offset):
-    no PyBDSF source within the matching radius ('pybdsf'), or a PyBDSF
+    no PyBDSF source within the matching ellipse ('pybdsf'), or a PyBDSF
     source that matching did not assign ('matching'). Below about SNR 3.5 the fitted
     sources are those detected often enough to pass the epoch cuts, so
     completeness there is biased high.
@@ -529,8 +535,10 @@ def completeness_with_truth(config, results, in_fit, sources):
     # The fit's settings, so the figure shows the step the fit used even if astkat.yaml has changed since.
     mcmc = results['config']['MCMC']
     censor = float(mcmc['flux_censor_snr'])
-    left_out = (detected & (rows[:, :, column_index('s_code')] != S_CODES.index('S'))
-                if mcmc['single_gaussian_only'] else np.zeros(detected.shape, dtype=bool))
+    # Not observed by the fit: C and M detections when it left them out, and ambiguous matches always.
+    code = rows[:, :, column_index('s_code')]
+    left_out = ((detected & (code != S_CODES.index('S')) if mcmc['single_gaussian_only']
+                 else np.zeros(detected.shape, dtype=bool)) | (code == AMBIGUOUS))
     with np.errstate(invalid='ignore'):
         measured = (detected & ~left_out
                     & (rows[:, :, column_index('peak_flux_Jy')] >= censor * rows[:, :, column_index('rms_Jy')]))
@@ -546,7 +554,7 @@ def completeness_with_truth(config, results, in_fit, sources):
     with open(RESULTS_DIR / 'observation_properties.json', 'r') as f:
         props = json.load(f)
     obs_isot = np.asarray(props['obs_isot'])[in_fit]
-    bmaj = np.asarray(props['bmaj_deg'], dtype=float)[in_fit]
+    beams = np.column_stack([np.asarray(props[k], dtype=float)[in_fit] for k in ('bmaj_deg', 'bmin_deg', 'bpa_deg')])
     match_threshold = float(config['THRESHOLDS']['match_threshold'])
 
     # Misses are traced through the per-epoch PyBDSF catalogues; a catalogue simulation has none.
@@ -557,10 +565,11 @@ def completeness_with_truth(config, results, in_fit, sources):
     for e in np.nonzero((~detected).any(axis=0))[0] if traced else []:
         missed = np.nonzero(~detected[:, e])[0]
         position = true_xy[missed] + injected[e]
-        radius = match_threshold * bmaj[e] * 3600.0
         with fits.open(Path('pybdsf_files') / f'catalog_{obs_isot[e]}_{project}.fits') as hdul:
             raw = tangent_plane_arcsec(hdul[1].data['RA'], hdul[1].data['DEC'], phase_centre)
-        in_raw = cKDTree(raw).query(position)[0] < radius if len(raw) else np.zeros(len(missed), bool)
+        # The matching region of matching.match_epochs: the epoch's beam ellipse scaled by 2 match_threshold.
+        in_raw = (cKDTree(beam_frame(raw, *beams[e])).query(beam_frame(position, *beams[e]))[0] < match_threshold
+                  if len(raw) else np.zeros(len(missed), bool))
         cause[missed, e] = np.where(in_raw, 1, 0)
 
     edges = 10 ** np.arange(0.0, 3.0 + 1e-9, 0.1)
@@ -594,10 +603,11 @@ def completeness_with_truth(config, results, in_fit, sources):
            else 1.0,
            'flux_fractional': (float(results['parameters']['flux_fractional']['median'])
                                if 'flux_fractional' in results['parameters'] else 0.0),
-           'floor': float(mcmc['detection_floor'])}
+           'floor': float(mcmc['detection_floor']), 'detect_threshold': float(mcmc['detection_censor_snr'])}
     out['model_snr'] = np.logspace(0.0, 3.0, 300)
     sigma = np.hypot(out['width'], out['flux_fractional'] * out['model_snr'])
     out['model'] = (1.0 - out['floor']) * ndtr((out['model_snr'] - out['threshold']) / sigma)
+    out['model_detected'] = (1.0 - out['floor']) * ndtr((out['model_snr'] - out['detect_threshold']) / sigma)
 
     n_missed = int((~detected).sum())
     shares = ', '.join(f"{name} {np.sum(cause == k) / max(n_missed, 1) * 100:.0f}%" for k, name in enumerate(CAUSES))
@@ -694,7 +704,7 @@ def write_offsets_summary(offsets):
         rms, mean, std = src['rms_mas'], src['chi_mean'], src['chi_std']
         lines += ["", "Sources against simulation truth", "--------------------------------",
                   f"{'Truth file':<52}{src['file']}",
-                  f"{'Fitted sources matched to injected ones':<52}{len(src['snr'])} of {src['n_fitted']}",
+                  f"{'Fitted sources matched to injected ones':<52}{len(src['fit_index'])} of {src['n_fitted']}",
                   f"{'Position rms, RA and Dec':<52}{rms[0]:.2f}, {rms[1]:.2f} mas",
                   f"{'Position chi mean +/- std, RA':<52}{mean[0]:+.2f} +/- {std[0]:.2f}",
                   f"{'Position chi mean +/- std, Dec':<52}{mean[1]:+.2f} +/- {std[1]:.2f}",

@@ -469,8 +469,8 @@ def corner_figure(results):
     """
     Posterior of the scalar fit parameters as a corner plot.
 
-    Filled density contours, 1D histograms with the 68% interval shaded, and
-    the posterior median marked; for simulations the injected values are
+    Posterior draws as points under filled density contours, 1D histograms
+    with the 68% interval shaded, and the posterior median marked; for simulations the injected values are
     dashed in the highlight colour, each panel's range widened to include
     them. Each diagonal panel is titled with the median and its 68% errors.
     Written to plots/fit_corner.
@@ -503,7 +503,8 @@ def corner_figure(results):
     fig = corner.corner(
         samples, labels=labels, label_kwargs={'fontsize': 14}, quantiles=[0.16, 0.5, 0.84], show_titles=False,
         smooth=2.5, bins=50, hist_kwargs={'alpha': 0.8, 'color': POSTERIOR_COLOUR}, color=POSTERIOR_COLOUR,
-        plot_datapoints=False, plot_density=True,
+        plot_datapoints=True, data_kwargs={'ms': 1.5, 'alpha': 0.35, 'color': POSTERIOR_LINE_COLOUR},
+        plot_density=True,
         contour_kwargs={'colors': POSTERIOR_LINE_COLOUR, 'linewidths': 1.2},
         contourf_kwargs={'colors': ['lightblue', POSTERIOR_COLOUR], 'alpha': 0.6},
         range=ranges, truths=medians, truth_color=POSTERIOR_LINE_COLOUR,
@@ -689,7 +690,7 @@ def affine_ellipses_figure(results):
 
 def snr_histograms_figure(results, unit='beam'):
     """
-    Residuals about the fitted true positions in broad SNR bins, against the model.
+    Residuals about one posterior draw in broad SNR bins, against the model (see fit.snr_histograms).
 
     One panel per bin: histograms of the residual along the beam's minor axis
     (black) and major axis (grey), outliers included, with the fitted mixture
@@ -1031,7 +1032,8 @@ def truth_sources_figure(offsets):
     """
     Fitted sources against the sources a simulation injected.
 
-    Top left: recovered minus injected position against SNR, right
+    Both SNR axes are the injected SNR, so a source's place on them does not
+    depend on its own fit. Top left: recovered minus injected position against SNR, right
     ascension in red and declination in blue, with 1-sigma errors. Top
     right: chi of both components, recovered minus injected over the
     posterior standard deviation, against N(0, 1). Bottom left: the residual of each source as
@@ -1042,7 +1044,7 @@ def truth_sources_figure(offsets):
     Written to plots/offsets_truth_sources.
     """
     src = offsets['truth_sources']
-    snr, diff, sd = src['snr'], src['diff'] * 1e3, src['sd'] * 1e3
+    snr, diff, sd = src['injected_snr'], src['diff'] * 1e3, src['sd'] * 1e3
     fig, axes = plt.subplots(2, 2, figsize=(7.5, 6.6), gridspec_kw={'hspace': 0.3, 'wspace': 0.3})
     ax_r, ax_h, ax_q, ax_f = axes.ravel()
     style = dict(fmt='.', ms=3, elinewidth=0.6, capsize=0)
@@ -1051,7 +1053,7 @@ def truth_sources_figure(offsets):
         ax_r.errorbar(snr, diff[:, k], yerr=sd[:, k], color=colour, ecolor=colour, label=name, **style)
     ax_r.axhline(0, color='0.4', lw=0.8, ls='--', zorder=0)
     ax_r.set_xscale('log')
-    ax_r.set_xlabel('Signal-to-noise ratio')
+    ax_r.set_xlabel('Signal-to-noise ratio (injected)')
     ax_r.set_ylabel('Recovered $-$ injected (mas)')
     ax_r.legend(loc='upper right', fontsize=8)
 
@@ -1087,7 +1089,7 @@ def truth_sources_figure(offsets):
                  label=r'Mean injected $1 + g_e$')
     ax_f.legend(loc='upper right', fontsize=8)
     ax_f.set_xscale('log')
-    ax_f.set_xlabel('Signal-to-noise ratio')
+    ax_f.set_xlabel('Signal-to-noise ratio (injected)')
     ax_f.set_ylabel(f"Recovered / injected peak\nflux density ({src['flux_method']})")
 
     save_figure(fig, 'offsets_truth_sources')
@@ -1100,7 +1102,8 @@ def completeness_figure(offsets):
     Black points are the fraction measured, detected with a peak at or above
     the censoring threshold T; grey points the fraction PyBDSF detected at
     all; both with binomial 1-sigma errors. The solid line is the step the fit
-    assumes for the measured fraction, (1 - e) Phi((SNR - T) / w). Dashed lines
+    assumes for the measured fraction, (1 - e) Phi((SNR - T) / w), and the
+    dash-dotted line its step for detection, at t = MCMC.detection_censor_snr. Dashed lines
     give the fraction of pairs lost at each stage: no PyBDSF source, or a
     PyBDSF source left unmatched.
     Written to plots/offsets_completeness.
@@ -1117,6 +1120,8 @@ def completeness_figure(offsets):
     ax.plot(c['model_snr'], c['model'], '-', color=MODEL_COLOUR, lw=1.3, zorder=2,
             label=rf"$(1 - {c['floor']:g})\,\Phi((\mathrm{{SNR}} - {c['threshold']:g}) / \sigma_p)$, "
                   rf"$k = {c['width']:.2f}$, $f_{{\rm frac}} = {c['flux_fractional']:.3f}$")
+    ax.plot(c['model_snr'], c['model_detected'], '-.', color=MODEL_COLOUR, lw=1.3, zorder=2,
+            label=rf"Detection step, $t = {c['detect_threshold']:g}$ rms")
     styles = {'pybdsf': ('Lost: no PyBDSF source', '0.6'), 'matching': ('Lost: matching', HIGHLIGHT_COLOUR)}
     for name, lost in c['lost'].items():
         ax.plot(c['snr_centre'][ok], lost[ok], '--', marker='.', ms=3, color=styles[name][1], lw=1.0,

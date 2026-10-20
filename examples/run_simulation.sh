@@ -3,17 +3,17 @@
 # Nothing varies between epochs except the noise realisation and the beam: constant field rms and target flux density.
 set -euo pipefail          # stop at the first failing step
 
-# Run in an empty directory, with astkat installed in the active Python environment (pip install astkat)
+# Run in an empty directory, with astkat installed in the active Python environment (see README)
 
 NAME=sim                   # project name
-MODE=flat             # noise, flat or catalogue (see the simulate calls below)
-IMAGES=images          # where simulate.py writes the epoch images
+MODE=noise             # noise, flat or catalogue (see the simulate calls below)
+IMAGES=images              # where simulate.py writes the epoch images
 N_EPOCHS=100               # number of epoch images
 N_TARGET=20                # epochs the target is simulated in
 A=1.0                      # flat and catalogue: injected SNR term of the position error at SNR 1, beam units
 BETA=1.0                   # flat and catalogue: injected SNR exponent, error A SNR^-BETA (1 = textbook 1 / SNR)
 SNR_BREAK=15               # flat and catalogue: injected break SNR of the SNR term
-SNR_GAMMA=0             # flat and catalogue: slope -BETA - SNR_GAMMA below SNR_BREAK (0 = no break)
+SNR_GAMMA=0                # flat and catalogue: slope -BETA - SNR_GAMMA below SNR_BREAK (0 = no break)
 B=0.01                     # injected position floor, fraction of the beam sigma per axis (every mode) ...
 B_ABSOLUTE=false           # ... or, true, B in arcsec on both axes; the fit then uses an absolute B too
 K=1.3                      # flat and catalogue: noise on each peak, in rms
@@ -21,12 +21,14 @@ FLUX_SYS=0.05              # every mode: spread of the per-epoch flux scale g_e,
 FLUX_FRAC=0.02             # every mode: fractional error on each source's peak in each epoch (f_frac)
 FLUX="--flux-sys $FLUX_SYS --flux-frac $FLUX_FRAC"
 OUTLIER_FRACTION=0.002     # flat and catalogue: chance each position is an outlier (~100 of 500 sources x 100 epochs)
-OUTLIER_SCALE=300           # flat and catalogue: outlier width over the inlier width
+OUTLIER_SCALE=6            # flat and catalogue: outlier width over the inlier width
 RMS_VARIATION=0.1          # noise mode: each epoch's rms is normal about the field rms with this fractional sigma
                            # (0.1 keeps 99.7% of epochs within 0.7-1.3); flat and catalogue keep a unit rms
-RANDOM_SEED=false          # true: a fresh seed for every simulate call (-R, printed and saved with the truth);
-                           # false: simulate.py's fixed default seed, so runs repeat
-SEED=$([ "$RANDOM_SEED" = true ] && echo -R || true)
+# Seed of every simulate call: an integer, so runs repeat; random, a fresh seed per call (-R, printed and saved
+# with the truth); or default, simulate.py's fixed default seed
+#SEED_VALUE=random
+SEED_VALUE=3329369676
+SEED=$(case "$SEED_VALUE" in default) ;; random) echo -R ;; *) echo "--seed $SEED_VALUE" ;; esac)
 FLOOR="-b $B $([ "$B_ABSOLUTE" = true ] && echo --b-absolute || true)"
 
 # Fresh run: remove previous products

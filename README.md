@@ -75,13 +75,15 @@ flux rms ra dec bmaj bmin bpa time
 `astkat init` writes `astkat_files/astkat.yaml`, and every comment in it explains the setting. The ones most often changed:
 
 - `PYBDSF.snr_threshold`: the detection threshold.
-- `THRESHOLDS.match_threshold`: the cross-matching radius, as a fraction of the beam.
+- `THRESHOLDS.match_threshold`: the cross-matching region, an ellipse shaped like the beam with semi-axes this many times BMAJ and BMIN (the default, 0.75, is 1.5 times the beam).
+- `THRESHOLDS.ambiguous_fraction`: a source that is ambiguous or blended with a neighbour (marked `S_Code A`) in more than this share of its epochs is dropped, as it's probably two sources the deep image couldn't separate.
 - `THRESHOLDS.epoch_min`: the number of epochs a source must appear in to be used.
 - `MCMC.snr_term`: how the position error depends on SNR. The default, `fixed`, is the textbook error, which falls as A / SNR. Two more flexible forms are available when the data need them:
   - `power`, A SNR^−β, fits the slope β.
   - `broken` follows 1 / SNR above a fitted break SNR and lets the slope change below it.
 
   A full description of the noise model and the SNR terms is coming soon in a separate document.
+- `MCMC.detection_censor_snr`: the fitted-peak SNR treated as the detection limit when fitting fluxes, set by default to just below `PYBDSF.snr_threshold`. Detections fainter than `MCMC.flux_censor_snr` are treated as lying between the two; non-detections lie below it.
 - `MCMC.correct_differential_aberration`: on by default for real data.
 
 The defaults assume MeerKAT. For another telescope, change `MCMC.observatory_location`.

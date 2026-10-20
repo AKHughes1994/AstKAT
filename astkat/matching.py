@@ -12,7 +12,8 @@ Usage
 Writes
     results/matched_catalog_{project}.npz
         data, shape (n_sources, n_epochs, n_columns), NaN where a source was
-        not detected; columns as in utils.CATALOG_COLUMNS.
+        not detected; columns as in utils.CATALOG_COLUMNS; peak_noise, the
+        measured scatter k of a fitted peak over the rms.
 """
 
 import json
@@ -23,15 +24,16 @@ import bottleneck as bn
 import yaml
 from astropy.coordinates import SkyCoord, match_coordinates_sky
 import astropy.units as u
+from scipy.spatial import cKDTree
 from scipy.stats import chi2, norm
 
 try:
-    from .utils import (msg, title, parse_phase_center, column_index, CATALOG_COLUMNS, S_CODES, epoch_frequencies,
-                        frequency_bands,
+    from .utils import (msg, title, parse_phase_center, column_index, CATALOG_COLUMNS, S_CODES, AMBIGUOUS,
+                        epoch_frequencies, frequency_bands, tangent_plane_arcsec, beam_frame,
                         remove_truth_csv_rows_by_position, remove_observation_properties_entries)
 except ImportError:
-    from utils import (msg, title, parse_phase_center, column_index, CATALOG_COLUMNS, S_CODES, epoch_frequencies,
-                       frequency_bands,
+    from utils import (msg, title, parse_phase_center, column_index, CATALOG_COLUMNS, S_CODES, AMBIGUOUS,
+                       epoch_frequencies, frequency_bands, tangent_plane_arcsec, beam_frame,
                        remove_truth_csv_rows_by_position, remove_observation_properties_entries)
 
 
@@ -43,7 +45,7 @@ RA, DEC = column_index('ra_deg'), column_index('dec_deg')
 FLUX, RMS, SNR = column_index('peak_flux_Jy'), column_index('rms_Jy'), column_index('snr')
 NEIGHBOUR_BEAMS = 2.0      # a matched source closer than this many BMAJ counts as a neighbour
 SELECTION_SNR_EDGES = (0.0, 5.0, 10.0, 30.0, 100.0, 1000.0, np.inf)   # median detected SNR bins of the selection table
-VARIABILITY_CLIP = 10.0          # a flux this many robust deviations from its band's median is a failed fit, not variability
+VARIABILITY_CLIP = 5.0          # a flux this many robust deviations from its band's median is a failed fit, not variability
 PEAK_NOISE_SNR = (10.0, 30.0)   # sources whose peak scatter measures k: untruncated, flux scale negligible
 PEAK_NOISE_MIN_DETECTIONS = 10  # ... each detected at least this often
 
@@ -120,42 +122,59 @@ def match_epochs(reference, epoch_files, ref_epoch, phase_centre, match_threshol
     """
     Place each epoch's sources against the reference sources.
 
-    A source matches the nearest reference source within match_threshold
-    times the epoch's BMAJ. Reference sources matched by more than one
-    source in an epoch are left unmatched in that epoch.
+    Separations are measured in the epoch's beam, along each axis in units
+    of that axis's FWHM (utils.beam_frame), so the matching region follows
+    the beam's shape. A source matches the reference source nearest in that
+    measure within match_threshold, an ellipse with semi-axes match_threshold
+    times BMAJ and BMIN (0.75: 1.5 times the beam). Reference sources matched
+    by more than one source in an epoch keep none of them and are marked
+    ambiguous (S_Code A) in that epoch. So is a reference source left without
+    a match while a source assigned to another lies inside its ellipse: the
+    two were blended, so it was not seen on its own rather than missed.
 
     Returns
     -------
     ndarray, shape (n_reference, n_epochs, n_columns), NaN where unmatched
     """
-    ref_coords = SkyCoord(np.array(reference['ra_deg']) * u.deg, np.array(reference['dec_deg']) * u.deg,
-                          frame='icrs')
-    catalog = np.full((len(ref_coords), len(epoch_files), len(CATALOG_COLUMNS)), np.nan)
+    ref_xy = tangent_plane_arcsec(np.array(reference['ra_deg']), np.array(reference['dec_deg']), phase_centre)
+    catalog = np.full((len(ref_xy), len(epoch_files), len(CATALOG_COLUMNS)), np.nan)
 
     for e, epoch_file in enumerate(epoch_files):
         cat = reference if e == ref_epoch else load_json(epoch_file)
         if not cat['ra_deg']:
             msg(f"{epoch_file.name}: no sources")
             continue
-        table, coords = epoch_table(cat, phase_centre)
+        table, _ = epoch_table(cat, phase_centre)
 
         if e == ref_epoch:
             catalog[:, e, :] = table
             msg(f"{epoch_file.name}: reference epoch, {len(table)} sources")
             continue
 
-        radius = match_threshold * cat['beam_bmaj_deg'][0]
-        nearest, separation, _ = match_coordinates_sky(coords, ref_coords)
-        close = np.nonzero(separation.deg < radius)[0]
+        beam = (cat['beam_bmaj_deg'][0], cat['beam_bmin_deg'][0], cat['beam_bpa_deg'][0])
+        xy = tangent_plane_arcsec(table[:, RA], table[:, DEC], phase_centre)
+        ref_beam, epoch_beam = beam_frame(ref_xy, *beam), beam_frame(xy, *beam)
+        distance, nearest = cKDTree(ref_beam).query(epoch_beam)
+        close = np.nonzero(distance < match_threshold)[0]
         targets, counts = np.unique(nearest[close], return_counts=True)
         unique_targets = set(targets[counts == 1])
         keep = np.array([i for i in close if nearest[i] in unique_targets], dtype=int)
         if keep.size:
             catalog[nearest[keep], e, :] = table[keep]
+        catalog[targets[counts > 1], e, column_index('s_code')] = AMBIGUOUS
+        # Unmatched, yet a source assigned to a neighbour lies inside the ellipse: blended, not missed.
+        unmatched = np.setdiff1d(np.arange(len(ref_xy)), targets)
+        inside = cKDTree(epoch_beam).query_ball_point(ref_beam[unmatched], match_threshold)
+        blended = unmatched[np.array([len(i) > 0 for i in inside], dtype=bool)]
+        catalog[blended, e, column_index('s_code')] = AMBIGUOUS
 
         n_ambiguous = int(np.sum(counts > 1))
-        msg(f"{epoch_file.name}: matched {keep.size} sources within {radius:.4f} deg"
-            + (f"; {n_ambiguous} reference sources left out for ambiguous matches" if n_ambiguous else ""))
+        msg(f"{epoch_file.name}: matched {keep.size} sources within {match_threshold * beam[0] * 3600:.2f} x "
+            f"{match_threshold * beam[1] * 3600:.2f} arcsec at {beam[2]:.0f} deg"
+            + (f"; {n_ambiguous} reference sources matched ambiguously" if n_ambiguous else "")
+            + (f"; {blended.size} blended with a neighbour" if blended.size else "")
+            + ("; both marked A" if n_ambiguous and blended.size else
+               "; marked A" if n_ambiguous or blended.size else ""))
     return catalog
 
 
@@ -283,6 +302,13 @@ def select_sources(catalog, thresholds, tolerance, radius):
     SNR (SELECTION_SNR_EDGES), with the point-like tests failed (a source can
     fail several) and how many removed sources have another matched source
     within NEIGHBOUR_BEAMS times BMAJ.
+
+    Returns
+    -------
+    catalog : ndarray
+        The kept sources.
+    k : float
+        The measured peak noise (see peak_noise_factor).
     """
     n_sources, n_epochs, _ = catalog.shape
     with np.errstate(all='ignore'):
@@ -311,6 +337,13 @@ def select_sources(catalog, thresholds, tolerance, radius):
         need = max(float(thresholds['epoch_fraction']) * n_epochs, epoch_min)
     remove(f"Detection (>= {need:.0f} epochs)", np.sum(np.isfinite(catalog[:, :, FLUX]), axis=1) >= need)
 
+    # A merged reference source (two sources the deep image could not split) is matched ambiguously in most epochs.
+    code = catalog[:, :, column_index('s_code')]
+    ambiguous_fraction = float(thresholds['ambiguous_fraction'])
+    with np.errstate(all='ignore'):
+        ambiguous = np.sum(code == AMBIGUOUS, axis=1) / np.sum(np.isfinite(code), axis=1)
+    remove(f"Unblended (ambiguous <= {ambiguous_fraction * 100:.0f}%)", ambiguous <= ambiguous_fraction)
+
     flux_threshold, size_threshold = float(thresholds['flux_threshold']), float(thresholds['size_threshold'])
     with np.errstate(all='ignore'):
         median = {name: bn.nanmedian(catalog[:, :, column_index(name)], axis=1)
@@ -324,9 +357,9 @@ def select_sources(catalog, thresholds, tolerance, radius):
                  + f"; neighbour < {NEIGHBOUR_BEAMS:g} beams: {int((removed & neighbour).sum())}")
 
     single_fraction = float(thresholds['single_fraction'])
-    code = catalog[:, :, column_index('s_code')]
     with np.errstate(all='ignore'):
-        single = np.sum(code == S_CODES.index('S'), axis=1) / np.sum(np.isfinite(code), axis=1) >= single_fraction
+        single = (np.sum(code == S_CODES.index('S'), axis=1) / np.sum(np.isfinite(code) & (code != AMBIGUOUS), axis=1)
+                  >= single_fraction)
     removed = remove(f"Single Gaussian (S >= {single_fraction * 100:.0f}%)", single)
     notes.append(f"Single Gaussian removals with a neighbour < {NEIGHBOUR_BEAMS:g} beams: "
                  f"{int((removed & neighbour).sum())}")
@@ -364,7 +397,7 @@ def select_sources(catalog, thresholds, tolerance, radius):
         msg(f"  {label:<34}" + "".join(f"{c:>10}" if c else f"{'.':>10}" for c in counts))
     for note in notes:
         msg(f"  {note}")
-    return catalog[keep]
+    return catalog[keep], k
 
 
 def drop_sparse_epochs(catalog, config):
@@ -411,17 +444,17 @@ def main():
     catalog = match_epochs(reference, epoch_files, ref_epoch, phase_centre,
                            float(config['THRESHOLDS']['match_threshold']))
     # Keep sources detected often enough and with steady flux, as variable sources make poor references.
-    catalog = select_sources(catalog, config['THRESHOLDS'], float(config['MCMC']['frequency_match_tolerance']),
-                             float(config['MCMC']['max_phase_offset_deg']))
+    catalog, k = select_sources(catalog, config['THRESHOLDS'], float(config['MCMC']['frequency_match_tolerance']),
+                                float(config['MCMC']['max_phase_offset_deg']))
 
     # Epochs with too few sources cannot constrain their own translation in the fit.
     catalog = drop_sparse_epochs(catalog, config)
 
-
+    # The measured peak noise k is where fit.py starts its own.
     out_file = RESULTS_DIR / f"matched_catalog_{config['BOOKKEEPING']['project_name']}.npz"
-    np.savez(out_file, data=catalog, columns=list(CATALOG_COLUMNS), shape=catalog.shape,
+    np.savez(out_file, data=catalog, columns=list(CATALOG_COLUMNS), shape=catalog.shape, peak_noise=k,
              description="AstKAT matched source catalogue (n_sources, n_epochs, n_columns); "
-                         "snr is each detection's peak flux over its rms")
+                         "snr is each detection's peak flux over its rms; peak_noise the measured k")
     msg(f"Saved matched catalogue: {out_file} ({catalog.shape[0]} sources x {catalog.shape[1]} epochs)")
 
 
