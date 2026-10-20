@@ -124,6 +124,8 @@ def create_project_config(name, deep_image, stack_image, image_dir, rms=False,
         'BOOKKEEPING': {
             'image_dir': image_dir,                 # directory holding the epoch images
             'stacked_image': stack_image,           # images to stack: True (all), "start,end", or False
+            'stack_min_epochs': 20,                 # stack a core of this many similar beams (all if fewer) ...
+            'stack_beam_growth': 0.15,              # ... plus any that widen its common beam's area by at most this
             'deep_image': f"{image_dir}/{name}_stacked.fits" if stack_image is not False else deep_image,
             'project_name': name,
             'phase_ctr': "0h00m00s 0d00m00s",       # set from the image headers by extraction.py

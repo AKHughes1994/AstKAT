@@ -2,8 +2,10 @@
 AstKAT image stacking.
 
 Builds the deep image used as the source-finding reference. The epoch images
-are restricted to one frequency band and to the beams most similar to the
-median beam, convolved to a common beam (the smallest ellipse enclosing every
+are restricted to one frequency band and to a set of similar beams (a core
+of BOOKKEEPING.stack_min_epochs with the smallest common beam, plus any that
+widen it by at most stack_beam_growth; all of them if there are fewer),
+convolved to their common beam (the smallest ellipse enclosing every
 selected beam), and median-combined pixel by pixel.
 
 Run by initialise.py with --stack-image, or on its own for an existing project:
@@ -33,8 +35,6 @@ except ImportError:
 
 
 FREQUENCY_TOLERANCE = 0.1       # images within 10% in frequency count as one band
-BEAM_KEEP_PERCENT = 68.0        # keep this share of beams closest to the median beam
-MIN_BEAMS_FOR_FILTER = 3        # below this many beams, keep them all
 ELLIPSE_SAMPLES = 50            # points per beam outline when finding the common beam
 PSF_SIZE = 101                  # pixels per side of the PSF images given to pypher
 FWHM_TO_SIGMA = (8 * np.log(2)) ** -0.5
@@ -452,45 +452,89 @@ def read_beams(images):
     return beams
 
 
-def filter_beams_by_similarity(beams, percent=BEAM_KEEP_PERCENT, min_beams=MIN_BEAMS_FOR_FILTER):
+def second_moments(beams):
     """
-    Keep the beams closest to the median beam.
+    Second-moment matrix of each beam, (n, 2, 2) in deg^2, in (East, North).
 
-    Distance is Euclidean in BMAJ, BMIN and cos(BPA), each scaled by its
-    median absolute deviation (standard deviation if the MAD is zero).
-    Nothing is removed if there are fewer than min_beams beams or if
-    filtering would drop only one or two.
+    Sigma = R diag(BMAJ^2, BMIN^2) R^T with the major axis along (sin BPA,
+    cos BPA): orientation counts as far as the beam is elongated, and BPA
+    and BPA + 180 deg are the same beam.
+    """
+    pa = np.radians([b['bpa'] for b in beams])
+    major = np.stack([np.sin(pa), np.cos(pa)], axis=-1)
+    minor = np.stack([-np.cos(pa), np.sin(pa)], axis=-1)
+    a2, b2 = np.array([b['bmaj'] for b in beams]) ** 2, np.array([b['bmin'] for b in beams]) ** 2
+    return a2[:, None, None] * major[:, :, None] * major[:, None, :] + b2[:, None, None] * minor[:, :, None] * minor[:, None, :]
+
+
+def select_beams(beams, min_epochs, growth, seed=DEFAULT_SEED):
+    """
+    The epochs to stack: a core of similar beams, then any others that barely widen its common beam.
+
+    With fewer than min_epochs beams every one is stacked. Otherwise the
+    core is the set of min_epochs beams, a seed and its nearest neighbours in
+    second-moment distance (the Frobenius norm of the difference over the
+    median BMAJ^2), whose common beam has the smallest area. Further beams
+    join while the common beam's area stays within (1 + growth) of the
+    core's: a beam inside the common beam always, as it costs no resolution,
+    then each time the one that widens it least.
 
     Returns
     -------
-    (kept_beams, description)
+    kept : list of beams
+    note : str
+        How the selection went, for the log and the FITS history.
     """
-    if len(beams) < min_beams:
-        return beams, f"too few beams to filter ({len(beams)} < {min_beams})"
+    if len(beams) < min_epochs:
+        return beams, f"all {len(beams)} beams, fewer than BOOKKEEPING.stack_min_epochs ({min_epochs})"
 
-    params = np.array([[b['bmaj'], b['bmin'], np.cos(np.radians(b['bpa']))] for b in beams])
-    median_bpa = np.median([b['bpa'] for b in beams])
-    centre = np.array([np.median(params[:, 0]), np.median(params[:, 1]), np.cos(np.radians(median_bpa))])
-    mad = np.median(np.abs(params - centre), axis=0)
-    scale = np.where(mad > 0, mad, np.std(params, axis=0))
-    distances = np.sqrt(np.sum(((params - centre) / scale) ** 2, axis=1))
+    sigma = second_moments(beams).reshape(len(beams), 4)
+    scale = np.median([b['bmaj'] for b in beams]) ** 2
+    distance = np.linalg.norm(sigma[:, None, :] - sigma[None, :, :], axis=-1) / scale
 
-    n_keep = max(min_beams, int(len(beams) * percent / 100.0))
-    if n_keep >= len(beams) - 2:
-        return beams, f"filtering would remove only {len(beams) - n_keep} beams; all kept"
+    def area(members):
+        target, _ = common_beam([beams[i] for i in members], seed=seed, quiet=True)
+        return target[0] * target[1]
 
-    order = np.argsort(distances, kind='stable')[:n_keep]
-    kept = [beams[i] for i in order]
-    msg(f"Median beam BMAJ={centre[0]:.6f}, BMIN={centre[1]:.6f}, BPA={median_bpa:.2f} deg; "
-        f"kept {n_keep} of {len(beams)} beams within distance {distances[order[-1]]:.3f}")
-    return kept, f"kept the {percent:.0f}% of beams closest to the median beam"
+    cores = [tuple(sorted(np.argsort(distance[i], kind='stable')[:min_epochs])) for i in range(len(beams))]
+    cores = list(dict.fromkeys(cores))
+    core_areas = [area(c) for c in cores]
+    kept = list(cores[int(np.argmin(core_areas))])
+    core_area = min(core_areas)
+    limit = (1.0 + growth) * core_area
+
+    # Each candidate is tried against the current common beam alone: a beam enclosing both encloses every kept
+    # beam, so the trial area is an upper bound, and the exact common beam is found once the set is chosen.
+    target, _ = common_beam([beams[i] for i in kept], seed=seed, quiet=True)
+    current = core_area
+    inside = widened = 0
+    rest = [i for i in range(len(beams)) if i not in kept]
+    while rest:
+        held = {'bmaj': target[0], 'bmin': target[1], 'bpa': target[2]}
+        trials = [common_beam([held, beams[i]], seed=seed, quiet=True)[0] for i in rest]
+        areas = np.array([t[0] * t[1] for t in trials])
+        best = int(np.argmin(areas))
+        if areas[best] > limit:
+            break
+        if areas[best] <= current * (1.0 + 1e-3):
+            inside += 1
+        else:
+            widened += 1
+        target, current = trials[best], areas[best]
+        kept.append(rest.pop(best))
+
+    note = (f"core of {min_epochs} beams with the smallest common beam, then {inside} beams inside it and "
+            f"{widened} that widened its area by {100 * (current / core_area - 1):.1f}% "
+            f"(BOOKKEEPING.stack_beam_growth {100 * growth:g}%); {len(kept)} of {len(beams)} beams")
+    msg(f"Beam selection: {note}")
+    return [beams[i] for i in kept], note
 
 
 # ============================================================================
 # COMMON BEAM
 # ============================================================================
 
-def common_beam(beams, seed=DEFAULT_SEED):
+def common_beam(beams, seed=DEFAULT_SEED, quiet=False):
     """
     Smallest beam enclosing every input beam.
 
@@ -518,9 +562,10 @@ def common_beam(beams, seed=DEFAULT_SEED):
     centre, semi_major, semi_minor, rotation = ellipse
 
     target = (semi_major / FWHM_TO_SIGMA, semi_minor / FWHM_TO_SIGMA, np.degrees(rotation - 0.5 * np.pi))
-    n_inside = sum(solver.is_point_inside(pt, ellipse) for pt in points)
-    msg(f"Common beam: BMAJ={target[0]:.6f}, BMIN={target[1]:.6f}, BPA={target[2]:.2f} deg "
-        f"({n_inside}/{len(points)} beam outline points enclosed)")
+    if not quiet:
+        n_inside = sum(solver.is_point_inside(pt, ellipse) for pt in points)
+        msg(f"Common beam: BMAJ={target[0]:.6f}, BMIN={target[1]:.6f}, BPA={target[2]:.2f} deg "
+            f"({n_inside}/{len(points)} beam outline points enclosed)")
 
     outline = solver.sample_ellipse((semi_major, semi_minor, rotation), num_pts=100) + centre
     return target, {'outlines': outlines, 'hull': hull_points, 'ellipse': outline, 'centre': centre}
@@ -719,8 +764,9 @@ def homogenise_and_stack_images(config, resources):
     Build the stacked deep image for a project.
 
     Steps: find the epoch images, keep one frequency band, apply the
-    BOOKKEEPING.stacked_image selection, keep the beams closest to the median
-    beam, convolve to the common beam, and take the pixel-wise median.
+    BOOKKEEPING.stacked_image selection, choose a similar set of beams
+    (select_beams, BOOKKEEPING.stack_min_epochs and stack_beam_growth),
+    convolve to their common beam, and take the pixel-wise median.
 
     Parameters
     ----------
@@ -747,11 +793,11 @@ def homogenise_and_stack_images(config, resources):
         raise ValueError("No images selected for stacking")
     msg(f"Selection: {selection} ({len(images)} images)")
 
-    # Outlying beams would force a large common beam, so only those near the median are kept.
+    # Beams of different shape or orientation widen the common beam, so only a similar set is stacked.
     msg("Reading beams...")
     beams = read_beams(images)
-    kept, filter_note = filter_beams_by_similarity(beams)
-    msg(f"Beam filter: {filter_note}")
+    kept, filter_note = select_beams(beams, int(bookkeeping['stack_min_epochs']),
+                                     float(bookkeeping['stack_beam_growth']), seed=bookkeeping.get('seed', DEFAULT_SEED))
     kept = sorted(kept, key=lambda b: b['path'])
 
     # The smallest beam that every kept beam can be convolved to.

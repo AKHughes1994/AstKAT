@@ -39,8 +39,10 @@ CONFIG_FILE = Path('astkat_files') / 'astkat.yaml'
 CATALOG_DIR = Path('pybdsf_files')
 RESULTS_DIR = Path('results')
 
-DEEP_SNR_THRESHOLD = 5.0        # PyBDSF thresh_pix for the deep image
-DEEP_ISLAND_THRESHOLD = 3.0     # PyBDSF thresh_isl for the deep image
+DEEP_SNR_THRESHOLD = 7.0        # PyBDSF thresh_pix for the deep image, as THRESHOLDS.snr_threshold keeps
+DEEP_ISLAND_THRESHOLD = 5.0     # PyBDSF thresh_isl for the deep image; high, so faint wings do not join neighbours
+DEEP_GROUP_BY_ISLAND = False    # deep image: each source its own entry, not one per island at the flux centroid
+DEEP_FIX_TO_BEAM = False        # deep image: Gaussian shapes fitted, as the stacked PSF need not match the header beam
 DEEP_RMS_FACTOR = 0.25          # a fixed BOOKKEEPING.rms is scaled by this for the deep image
 PHASE_CENTRE_TOLERANCE_ARCSEC = 1e-3
 
@@ -223,7 +225,10 @@ def run_pybdsf(image_path, config, output_dir=CATALOG_DIR, overwrite=False, deep
     Run PyBDSF on one image and save its source list as a FITS catalogue.
 
     Uses the PYBDSF section of astkat.yaml. The deep image uses
-    DEEP_SNR_THRESHOLD and DEEP_ISLAND_THRESHOLD instead. A fixed
+    DEEP_SNR_THRESHOLD, DEEP_ISLAND_THRESHOLD and DEEP_GROUP_BY_ISLAND
+    instead: its round, wide stacked beam and low noise join neighbouring
+    sources into one island, and grouping by island would place the
+    reference of each at the island's flux centroid. A fixed
     BOOKKEEPING.rms replaces PyBDSF's noise map (scaled by DEEP_RMS_FACTOR
     for the deep image); in a simulated project an epoch image's own NOISE
     header, the unit rms times its flux scale, takes its place.
@@ -259,6 +264,7 @@ def run_pybdsf(image_path, config, output_dir=CATALOG_DIR, overwrite=False, deep
 
     thresh_pix = DEEP_SNR_THRESHOLD if deep else pybdsf['snr_threshold']
     thresh_isl = DEEP_ISLAND_THRESHOLD if deep else pybdsf['thresh_isl']
+    fix_to_beam = DEEP_FIX_TO_BEAM if deep else pybdsf.get('fix_to_beam', True)
     extra = dict(pybdsf.get('zargs') or {})
     rms = config['BOOKKEEPING'].get('rms', False)
     if rms is not False:
@@ -266,15 +272,16 @@ def run_pybdsf(image_path, config, output_dir=CATALOG_DIR, overwrite=False, deep
         extra['rms_value'] = rms * DEEP_RMS_FACTOR if deep else (float(noise) if noise is not None else rms)
         extra['rms_map'] = False
 
-    msg(f"PyBDSF on {image_name}: thresh_pix={thresh_pix}, thresh_isl={thresh_isl}"
+    msg(f"PyBDSF on {image_name}: thresh_pix={thresh_pix}, thresh_isl={thresh_isl}, "
+        f"group_by_isl={DEEP_GROUP_BY_ISLAND if deep else True}, fix_to_beam={fix_to_beam}"
         + (f", extra arguments {extra}" if extra else ""))
     try:
         import bdsf
         img = bdsf.process_image(image_path,
                                  thresh_pix=thresh_pix,
                                  thresh_isl=thresh_isl,
-                                 fix_to_beam=pybdsf.get('fix_to_beam', True),
-                                 group_by_isl=True,
+                                 fix_to_beam=fix_to_beam,
+                                 group_by_isl=DEEP_GROUP_BY_ISLAND if deep else True,
                                  flag_maxsize_fwhm=pybdsf.get('flag_maxsize_fwhm', 0.1),
                                  **extra)
         img.write_catalog(format='fits', catalog_type='srl', outfile=str(output_file), clobber=True)

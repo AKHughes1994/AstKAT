@@ -53,13 +53,6 @@ def column_index(name):
     return CATALOG_COLUMNS.index(name)
 
 
-# ============================================================================
-# LOGGING
-# ============================================================================
-
-_log_file_handle = None   # opened on the first msg() call; False if opening failed
-
-
 def epoch_frequencies(catalog):
     """Each epoch's frequency in Hz, the median over its detections, from a matched catalogue (sources, epochs, columns)."""
     with np.errstate(all='ignore'):
@@ -87,6 +80,13 @@ def frequency_bands(freq, tolerance):
         remaining &= ~members
         label += 1
     return band
+
+
+# ============================================================================
+# LOGGING
+# ============================================================================
+
+_log_file_handle = None   # opened on the first msg() call; False if opening failed
 
 
 def _get_log_file():
@@ -130,7 +130,6 @@ def msg(txt):
             log_file.flush()
         except Exception:
             pass
-
 
 
 def title(txt):
@@ -181,7 +180,8 @@ def remove_truth_csv_rows_by_position(csv_path, positions_to_remove, reason=""):
 
     removed_epochs = [rows[i]['epoch_index'] for i in sorted(positions) if i < len(rows)]
     suffix = f" ({reason})" if reason else ""
-    msg(f"Removed {len(removed_epochs)} epoch(s) from {csv_path.name}{suffix}: epoch_index {removed_epochs}")
+    msg(f"Removed {len(removed_epochs)} epochs from {csv_path.name}{suffix}, {len(kept_rows)} left: "
+        f"epoch_index {removed_epochs}")
 
 
 def remove_observation_properties_entries(obs_props_path, positions_to_remove=None,
@@ -237,8 +237,7 @@ def remove_observation_properties_entries(obs_props_path, positions_to_remove=No
         json.dump(data, f, indent=4)
 
     suffix = f" ({reason})" if reason else ""
-    msg(f"Removed {len(removed_ids)} entr{'y' if len(removed_ids) == 1 else 'ies'} "
-        f"from {obs_props_path.name}{suffix}: {removed_ids}")
+    msg(f"Removed {len(removed_ids)} of {n} epochs from {obs_props_path.name}{suffix}: {removed_ids}")
 
 
 def is_simulated(config):
@@ -254,11 +253,8 @@ def is_simulated(config):
     config : dict
         Parsed astkat.yaml.
     """
-    bookkeeping = (config or {}).get('BOOKKEEPING', {}) or {}
-    if bookkeeping.get('simulated'):
-        return True
-    image_dir = bookkeeping.get('image_dir')
-    return bool(image_dir) and (Path(image_dir) / SIMULATION_TRUTH_FILE).exists()
+    bookkeeping = config['BOOKKEEPING']
+    return bool(bookkeeping.get('simulated')) or (Path(bookkeeping['image_dir']) / SIMULATION_TRUTH_FILE).exists()
 
 
 def parse_phase_center(phase_center):
@@ -279,11 +275,9 @@ def parse_phase_center(phase_center):
         return phase_center.icrs
     try:
         return SkyCoord(phase_center).icrs
-    except Exception:
-        if ' ' in phase_center:
-            ra_str, dec_str = phase_center.split(' ', 1)
-            return SkyCoord(ra=ra_str, dec=dec_str, unit=(u.hourangle, u.deg)).icrs
-        return SkyCoord(ra=phase_center, dec=0, unit=(u.hourangle, u.deg)).icrs
+    except ValueError:
+        ra_str, dec_str = phase_center.split(' ', 1)
+        return SkyCoord(ra=ra_str, dec=dec_str, unit=(u.hourangle, u.deg)).icrs
 
 
 # ============================================================================
@@ -320,17 +314,11 @@ def get_system_resources(memory_threshold=0.5):
     optimal_threads_io = min(12, cpu_logical)
     optimal_processes_cpu = max(1, cpu_physical)
 
-    msg("")
-    msg("=== System Resource Analysis: ===")
-    msg(f"  Physical CPU cores: {cpu_physical}")
-    msg(f"  Logical CPU cores: {cpu_logical}")
-    msg(f"  Total memory: {total_memory_gb:.1f} GB")
-    msg(f"  Available memory: {available_memory_gb:.1f} GB")
-    msg(f"  Usable memory ({int(memory_threshold * 100)}%): {usable_memory_gb:.1f} GB")
-    msg(f"  Usable memory pixels: {usable_memory_pixels:,}")
-    msg(f"  Free disk space: {free_disk_gb:.1f} GB")
-    msg(f"  Optimal I/O threads: {optimal_threads_io}")
-    msg(f"  Optimal CPU processes: {optimal_processes_cpu}")
+    title("System resources")
+    msg(f"CPU {cpu_physical} physical, {cpu_logical} logical cores; memory {total_memory_gb:.1f} GB total, "
+        f"{available_memory_gb:.1f} GB available, {usable_memory_gb:.1f} GB usable ({memory_threshold * 100:.0f}%, "
+        f"{usable_memory_pixels:,} float32 pixels); disk {free_disk_gb:.1f} GB free")
+    msg(f"Workers: {optimal_threads_io} I/O threads, {optimal_processes_cpu} processes")
 
     return {
         'cpu_physical': cpu_physical,
@@ -362,12 +350,12 @@ def load_system_resources(files_dir='astkat_files'):
     try:
         with open(system_file, 'r') as f:
             system_resources = json.load(f)
-        msg(f"System resources loaded from {system_file}")
+        msg(f"System resources from {system_file}")
         return system_resources
     except FileNotFoundError:
-        msg(f"System resources file not found: {system_file}; detecting again")
+        msg(f"{system_file} not found; detecting system resources")
     except json.JSONDecodeError as e:
-        msg(f"Could not parse {system_file} ({e}); detecting again")
+        msg(f"{system_file} unreadable ({e}); detecting system resources")
     return get_system_resources()
 
 
@@ -383,8 +371,7 @@ def tangent_plane_arcsec(ra_deg, dec_deg, phase_centre):
     a0, d0 = phase_centre.ra.rad, phase_centre.dec.rad
     e_ra = np.array([-np.sin(a0), np.cos(a0), 0.0])
     e_dec = np.array([-np.sin(d0) * np.cos(a0), -np.sin(d0) * np.sin(a0), np.cos(d0)])
-    ra, dec = np.radians(ra_deg), np.radians(dec_deg)
-    n = np.array([np.cos(dec) * np.cos(ra), np.cos(dec) * np.sin(ra), np.sin(dec)])
+    n = _radec_to_unit(ra_deg, dec_deg)
     return np.column_stack([e_ra @ n, e_dec @ n]) * ARCSEC_PER_RAD
 
 
@@ -402,117 +389,17 @@ def beam_frame(xy, bmaj_deg, bmin_deg, bpa_deg):
     ----------
     xy : ndarray, shape (n, 2)
         (RA, Dec) offsets, arcsec (see tangent_plane_arcsec).
-    bmaj_deg, bmin_deg, bpa_deg : float
-        The beam.
+    bmaj_deg, bmin_deg, bpa_deg : float or ndarray of shape (n,)
+        The beam, one for all rows or one per row.
 
     Returns
     -------
     ndarray, shape (n, 2)
     """
     pa = np.radians(bpa_deg)
-    major = xy @ np.array([np.sin(pa), np.cos(pa)]) / (bmaj_deg * 3600.0)
-    minor = xy @ np.array([-np.cos(pa), np.sin(pa)]) / (bmin_deg * 3600.0)
+    major = (xy[:, 0] * np.sin(pa) + xy[:, 1] * np.cos(pa)) / (np.asarray(bmaj_deg) * 3600.0)
+    minor = (-xy[:, 0] * np.cos(pa) + xy[:, 1] * np.sin(pa)) / (np.asarray(bmin_deg) * 3600.0)
     return np.column_stack([major, minor])
-
-
-def nan_average(data, weights=None, return_error=False, axis=0):
-    """
-    Average ignoring NaNs, optionally weighted.
-
-    Parameters
-    ----------
-    data : ndarray
-    weights : ndarray, optional
-        Same shape as data.
-    return_error : bool
-        With weights, also return 1/sqrt(sum of weights).
-    axis : int
-
-    Returns
-    -------
-    ndarray, or array of (average, uncertainty) when return_error is True
-    """
-    if weights is None:
-        return bn.nanmean(data, axis=axis)
-
-    mask = np.isnan(data)
-    avg = np.ma.average(np.ma.MaskedArray(data, mask=mask), weights=weights, axis=axis)
-    if return_error:
-        uncertainty = np.ma.sum(np.ma.MaskedArray(weights, mask=mask), axis=axis) ** (-0.5)
-        return np.array([avg, uncertainty])
-    return avg
-
-
-def median_positions(ras, decs, axis=2):
-    """
-    Median sky position, robust to outliers, with a spherical offset correction step.
-
-    Parameters
-    ----------
-    ras, decs : ndarray
-        Right ascension and declination in degrees.
-    axis : int
-        Axis to take the median over.
-
-    Returns
-    -------
-    (ra, dec) in degrees
-    """
-    # First estimate from medians of Dec and of RA scaled by cos(Dec).
-    centre_dec = bn.nanmedian(decs, axis=axis)
-    scaled_ras = ras * np.cos(np.deg2rad(decs))
-    centre_ra = bn.nanmedian(scaled_ras, axis=axis) / np.cos(np.deg2rad(centre_dec))
-
-    # Refine with the median of the true on-sky offsets from that estimate.
-    _, _, ra_offsets, dec_offsets = decompose_coordinate_offsets(centre_ra, centre_dec, ras, decs)
-    ra_correction = bn.nanmedian(ra_offsets, axis=axis)
-    dec_correction = bn.nanmedian(dec_offsets, axis=axis)
-
-    return (centre_ra + ra_correction / np.cos(np.deg2rad(centre_dec)),
-            centre_dec + dec_correction)
-
-
-def decompose_coordinate_offsets(ref_ra, ref_dec, ras, decs):
-    """
-    Offsets of sources from a reference position, split into RA and Dec.
-
-    Adapted from an implementation by Gregory R. Sivakoff.
-
-    Parameters
-    ----------
-    ref_ra, ref_dec : float or ndarray
-        Reference position in degrees; broadcast against ras and decs.
-    ras, decs : ndarray
-        Source positions in degrees.
-
-    Returns
-    -------
-    separations : ndarray
-        Angular separation in degrees.
-    position_angles : ndarray
-        Position angle of each source seen from the reference, radians East of North.
-    ra_offsets : ndarray
-        RA offset in degrees, a true angle on the sky (includes cos dec).
-    dec_offsets : ndarray
-        Dec offset in degrees.
-
-    A source 1 arcsec east of the reference has ra_offsets = +1/3600.
-    """
-    ref_ra = np.asarray(ref_ra)
-    ref_dec = np.asarray(ref_dec)
-    while ref_ra.ndim < ras.ndim:
-        ref_ra = ref_ra[..., None]
-        ref_dec = ref_dec[..., None]
-
-    reference = SkyCoord(ref_ra * u.deg, ref_dec * u.deg, frame='icrs')
-    sources = SkyCoord(ras * u.deg, decs * u.deg, frame='icrs')
-    separations = reference.separation(sources)
-    position_angles = reference.position_angle(sources)
-
-    return (separations.deg,
-            position_angles.rad,
-            (separations * np.sin(position_angles.rad)).deg,
-            (separations * np.cos(position_angles.rad)).deg)
 
 
 # ============================================================================
@@ -543,8 +430,7 @@ def decompose_coordinate_offsets(ref_ra, ref_dec, ras, decs):
 #   over the year with the Earth's orbit. The shift is purely radial, s sin(rho)
 #   at angular distance rho, so the residual beyond the linear scale is cubic,
 #   0.002 mas at 0.45 deg. Solar deflection adds a few mas across a 0.45 deg
-#   field within ~10 deg of the Sun, as a shear rather than a scale. On J1727
-#   MeerKAT data the fitted per-epoch scale follows s(t) with k = 0.99 +/- 0.03.
+#   field within ~10 deg of the Sun, as a shear rather than a scale.
 #
 # Correction
 #   Since a(x) - a(p) + p is parallel to x_meas and |a(x)| = 1,
@@ -927,8 +813,8 @@ def aberration_scale(phase_center, times, location=None):
 #
 # The same model computed through astropy's ICRS -> GCRS transform, which
 # applies the same physics (annual and diurnal aberration, solar deflection)
-# as a black box. Kept as the reference that the closed form above is
-# validated against (test_aberration.py); the pipeline does not use it.
+# as a black box, for comparison with the closed form above; nothing in the
+# pipeline calls it.
 #
 # It is slower because astropy evaluates the ephemeris and Earth rotation for
 # every position rather than every epoch, and its inverse is a fixed-point
@@ -1058,16 +944,15 @@ def correct_catalog_for_aberration(catalog, phase_center, times, location=None, 
     out[:, :, ra_idx] = new_ra
     out[:, :, dec_idx] = new_dec
 
-    # Log the applied shifts; they grow with distance from the phase centre, up to ~0.2 arcsec.
+    # The shifts grow with distance from the phase centre, up to ~0.2 arcsec.
     ok = np.isfinite(ra) & np.isfinite(dec)
     if np.any(ok):
         shift = _angle_arcsec(_radec_to_unit(ra[ok], dec[ok]), _radec_to_unit(new_ra[ok], new_dec[ok]))
         s = aberration_scale(pc, times, location)
-        msg(f"Differential aberration correction: {ok.sum()} positions over {catalog.shape[1]} epochs "
-            f"({times.min().isot[:10]} to {times.max().isot[:10]})")
-        msg(f"  First-order scale range: {s.min() * 1e5:+.2f} to {s.max() * 1e5:+.2f} x 1e-5")
-        msg(f"  Applied shift: median {np.median(shift) * 1e3:.1f} mas, max {np.max(shift) * 1e3:.1f} mas; "
-            f"deflection inverse converged to {conv * 1e3:.1e} mas")
+        msg(f"Differential aberration: {ok.sum()} positions over {catalog.shape[1]} epochs "
+            f"({times.min().isot[:10]} to {times.max().isot[:10]}), scale {s.min() * 1e5:+.2f} to "
+            f"{s.max() * 1e5:+.2f} x 1e-5, shift median {np.median(shift) * 1e3:.1f} mas, max "
+            f"{np.max(shift) * 1e3:.1f} mas, inverse converged to {conv * 1e3:.1e} mas")
     return out
 
 
@@ -1104,10 +989,10 @@ def apply_aberration_correction_from_config(catalog, config, results_dir='result
         observatory location.
     """
     if is_simulated(config):
-        msg("Differential aberration correction skipped: simulated data contain no aberration")
+        msg("Differential aberration not corrected: simulated data contain none")
         return catalog, {'corrected': False, 'reason': 'simulated data'}
     if not aberration_correction_enabled(config):
-        msg("Differential aberration correction disabled (MCMC.correct_differential_aberration)")
+        msg("Differential aberration not corrected (MCMC.correct_differential_aberration false)")
         return catalog, {'corrected': False, 'reason': 'disabled in astkat.yaml'}
 
     # Each epoch's observation time sets the observer's velocity, and so the size of the shift.

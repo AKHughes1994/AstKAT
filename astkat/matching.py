@@ -13,7 +13,10 @@ Writes
     results/matched_catalog_{project}.npz
         data, shape (n_sources, n_epochs, n_columns), NaN where a source was
         not detected; columns as in utils.CATALOG_COLUMNS; peak_noise, the
-        measured scatter k of a fitted peak over the rms.
+        measured scatter k of a fitted peak over the rms; per source,
+        reference_ra_deg and reference_dec_deg, the reference position of
+        the final match (refined for a deep reference), and original_ra_deg
+        and original_dec_deg, its position in the reference catalogue.
 """
 
 import json
@@ -48,6 +51,10 @@ SELECTION_SNR_EDGES = (0.0, 5.0, 10.0, 30.0, 100.0, 1000.0, np.inf)   # median d
 VARIABILITY_CLIP = 5.0          # a flux this many robust deviations from its band's median is a failed fit, not variability
 PEAK_NOISE_SNR = (10.0, 30.0)   # sources whose peak scatter measures k: untruncated, flux scale negligible
 PEAK_NOISE_MIN_DETECTIONS = 10  # ... each detected at least this often
+REFINE_TIGHTNESS = 2.0          # a refined reference's matches may scatter at most this times the expected error
+REFINE_FLOOR = 0.05             # ... which has this floor per axis, in beam sigma (epoch shifts, systematic floor)
+REFINE_MERGE_BMIN = 0.25        # refined references closer than this many BMIN are one source seen twice
+FWHM_TO_SIGMA = 1.0 / (2.0 * np.sqrt(2.0 * np.log(2.0)))
 
 
 def load_json(path):
@@ -115,10 +122,10 @@ def epoch_table(cat, phase_centre):
         'flux_ratio': cat['flux_ratio'], 'maj_ratio': cat['maj_ratio'], 'min_ratio': cat['min_ratio'],
         's_code': cat['s_code'],
     }
-    return np.column_stack([values[name] for name in CATALOG_COLUMNS]), coords
+    return np.column_stack([values[name] for name in CATALOG_COLUMNS])
 
 
-def match_epochs(reference, epoch_files, ref_epoch, phase_centre, match_threshold):
+def match_epochs(reference, epoch_files, ref_epoch, phase_centre, match_threshold, quiet=False):
     """
     Place each epoch's sources against the reference sources.
 
@@ -142,13 +149,15 @@ def match_epochs(reference, epoch_files, ref_epoch, phase_centre, match_threshol
     for e, epoch_file in enumerate(epoch_files):
         cat = reference if e == ref_epoch else load_json(epoch_file)
         if not cat['ra_deg']:
-            msg(f"{epoch_file.name}: no sources")
+            if not quiet:
+                msg(f"{epoch_file.name}: no sources")
             continue
-        table, _ = epoch_table(cat, phase_centre)
+        table = epoch_table(cat, phase_centre)
 
         if e == ref_epoch:
             catalog[:, e, :] = table
-            msg(f"{epoch_file.name}: reference epoch, {len(table)} sources")
+            if not quiet:
+                msg(f"{epoch_file.name}: reference epoch, {len(table)} sources")
             continue
 
         beam = (cat['beam_bmaj_deg'][0], cat['beam_bmin_deg'][0], cat['beam_bpa_deg'][0])
@@ -168,14 +177,136 @@ def match_epochs(reference, epoch_files, ref_epoch, phase_centre, match_threshol
         blended = unmatched[np.array([len(i) > 0 for i in inside], dtype=bool)]
         catalog[blended, e, column_index('s_code')] = AMBIGUOUS
 
-        n_ambiguous = int(np.sum(counts > 1))
-        msg(f"{epoch_file.name}: matched {keep.size} sources within {match_threshold * beam[0] * 3600:.2f} x "
-            f"{match_threshold * beam[1] * 3600:.2f} arcsec at {beam[2]:.0f} deg"
-            + (f"; {n_ambiguous} reference sources matched ambiguously" if n_ambiguous else "")
-            + (f"; {blended.size} blended with a neighbour" if blended.size else "")
-            + ("; both marked A" if n_ambiguous and blended.size else
-               "; marked A" if n_ambiguous or blended.size else ""))
+        if not quiet:
+            n_ambiguous = int(np.sum(counts > 1))
+            msg(f"{epoch_file.name}: {keep.size} matched within {match_threshold * beam[0] * 3600:.2f}\" x "
+                f"{match_threshold * beam[1] * 3600:.2f}\" at {beam[2]:.0f} deg"
+                + (f", {n_ambiguous} ambiguous" if n_ambiguous else "")
+                + (f", {blended.size} blended" if blended.size else "")
+                + (" (marked A)" if n_ambiguous or blended.size else ""))
     return catalog
+
+
+def refine_positions(reference, catalog, phase_centre, match_threshold, min_matches):
+    """
+    Reference positions moved onto their sources where the first match shows them clearly offset.
+
+    The deep image can place a reference off its source (a blended island,
+    the non-Gaussian stacked beam), so the epochs' own detections are the
+    better position. A reference is moved to the median of its matched
+    epoch positions only if all of these hold:
+        at least min_matches unambiguous S_Code S matches, which alone set the median
+        their scatter about it, in each epoch's beam, is at most REFINE_TIGHTNESS times
+            the expected sqrt((1 / SNR)^2 + REFINE_FLOOR^2) beam sigma per axis, so they
+            are one source, not two
+        the move is within match_threshold in the beam of every one of those epochs, so
+            it stays inside the region the matches came from
+    Two moved references landing within REFINE_MERGE_BMIN of each other whose
+    matches never share an epoch are one source seen twice; the one with fewer
+    matches is dropped.
+
+    Returns
+    -------
+    ra, dec : ndarray, the refined positions (unchanged where not moved), degrees
+    moved : ndarray of bool
+    keep : ndarray of bool, False for the dropped duplicates
+    shift : ndarray, the move in arcsec (0 where not moved)
+    tally : dict, how many references had enough S matches, and how many of those were too loose or
+        would have moved outside the matching ellipse
+    """
+    ra, dec = np.array(reference['ra_deg'], dtype=float), np.array(reference['dec_deg'], dtype=float)
+    ref_xy = tangent_plane_arcsec(ra, dec, phase_centre)
+    code = catalog[:, :, column_index('s_code')]
+    single = np.isfinite(catalog[:, :, RA]) & (code == S_CODES.index('S'))
+    moved, shift = np.zeros(len(ra), bool), np.zeros(len(ra))
+    offset = np.zeros((len(ra), 2))
+    candidates = np.nonzero(single.sum(axis=1) >= min_matches)[0]
+    tally = {'candidates': candidates.size, 'loose': 0, 'outside': 0}
+    for j in candidates:
+        rows = catalog[j, single[j]]
+        d = tangent_plane_arcsec(rows[:, RA], rows[:, DEC], phase_centre) - ref_xy[j]
+        median = np.median(d, axis=0)
+        beam = (rows[:, column_index('bmaj_deg')], rows[:, column_index('bmin_deg')], rows[:, column_index('bpa_deg')])
+        # Scatter about the median in units of each epoch's beam sigma, against the expected per-axis error.
+        residual = beam_frame(d - median, *beam) / FWHM_TO_SIGMA
+        expected = np.sqrt(1.0 / rows[:, SNR] ** 2 + REFINE_FLOOR ** 2)[:, None]
+        tight = np.sqrt(np.mean((residual / expected) ** 2)) <= REFINE_TIGHTNESS
+        inside = np.all(np.hypot(*beam_frame(np.tile(median, (len(rows), 1)), *beam).T) < match_threshold)
+        tally['loose'] += int(not tight)
+        tally['outside'] += int(tight and not inside)
+        if tight and inside:
+            moved[j], offset[j], shift[j] = True, median, np.hypot(*median)
+
+    # Duplicates: moved onto the same spot, with matches in different epochs.
+    keep = np.ones(len(ra), bool)
+    new_xy = ref_xy + offset
+    radius = REFINE_MERGE_BMIN * bn.nanmedian(catalog[:, :, column_index('bmin_deg')]) * 3600.0
+    shifted = np.nonzero(moved)[0]
+    for a, b in cKDTree(new_xy[shifted]).query_pairs(radius):
+        i, k = shifted[a], shifted[b]
+        if keep[i] and keep[k] and not np.any(single[i] & single[k]):
+            keep[k if single[k].sum() < single[i].sum() else i] = False
+
+    # Small offsets, so a local shift in RA and Dec is exact enough.
+    ra = ra + offset[:, 0] / 3600.0 / np.cos(np.radians(dec))
+    dec = dec + offset[:, 1] / 3600.0
+    return ra, dec, moved, keep, shift, tally
+
+
+def subset_reference(reference, keep, ra, dec):
+    """A copy of the reference catalogue with only the kept sources, at positions ra and dec."""
+    out = {name: [v for v, k in zip(values, keep) if k] if isinstance(values, list) and len(values) == len(keep)
+           else values for name, values in reference.items()}
+    out['ra_deg'], out['dec_deg'] = list(ra[keep]), list(dec[keep])
+    return out
+
+
+def two_pass_match(reference, epoch_files, phase_centre, match_threshold, min_matches):
+    """
+    Match against the deep reference, refine its positions on the matches, and match again.
+
+    The refined positions (refine_positions) are kept per source only if the
+    second match gives it at least as many matches and no more ambiguous (A)
+    epochs as the first; otherwise it goes back to its deep position. The final
+    match uses the accepted positions, so a refinement can only add matches.
+
+    Returns
+    -------
+    catalog : ndarray, shape (n_kept, n_epochs, n_columns), as match_epochs
+    reference : ndarray, shape (n_kept, 2)
+        RA and Dec (deg) of each row's reference in the final match.
+    original : ndarray, shape (n_kept, 2)
+        RA and Dec (deg) of each row's reference in the deep catalogue.
+    """
+    first = match_epochs(reference, epoch_files, None, phase_centre, match_threshold, quiet=True)
+    ra, dec, moved, keep, shift, tally = refine_positions(reference, first, phase_centre, match_threshold,
+                                                          min_matches)
+    second = match_epochs(subset_reference(reference, keep, ra, dec), epoch_files, None, phase_centre,
+                          match_threshold, quiet=True)
+
+    def counts(catalog):
+        return (np.sum(np.isfinite(catalog[:, :, RA]), axis=1),
+                np.sum(catalog[:, :, column_index('s_code')] == AMBIGUOUS, axis=1))
+
+    (n1, a1), (n2, a2) = counts(first[keep]), counts(second)
+    worse = moved[keep] & ((n2 < n1) | (a2 > a1))
+    index = np.nonzero(keep)[0][worse]
+    ra[index], dec[index] = np.array(reference['ra_deg'])[index], np.array(reference['dec_deg'])[index]
+    accepted = moved & keep
+    accepted[index] = False
+
+    final = match_epochs(subset_reference(reference, keep, ra, dec), epoch_files, None, phase_centre, match_threshold)
+    moves = (f", shift median {np.median(shift[accepted]):.2f}\", largest {shift[accepted].max():.2f}\""
+             if accepted.any() else "")
+    s_code = column_index('s_code')
+    msg(f"Reference refinement: {tally['candidates']} of {len(moved)} references with >= {min_matches} S matches; "
+        f"{tally['loose']} too loose (scatter > {REFINE_TIGHTNESS:g}x expected), {tally['outside']} would leave the "
+        f"matching ellipse, {int(moved.sum())} moved; {int(worse.sum())} reverted as worse, {int((~keep).sum())} "
+        f"duplicates (< {REFINE_MERGE_BMIN:g} BMIN) dropped; {int(accepted.sum())} kept{moves}; matches "
+        f"{int(np.isfinite(first[:, :, RA]).sum())} -> {int(np.isfinite(final[:, :, RA]).sum())}, A epochs "
+        f"{int((first[:, :, s_code] == AMBIGUOUS).sum())} -> {int((final[:, :, s_code] == AMBIGUOUS).sum())}")
+    original = np.column_stack([reference['ra_deg'], reference['dec_deg']])[keep]
+    return final, np.column_stack([ra, dec])[keep], original
 
 
 # ============================================================================
@@ -309,6 +440,8 @@ def select_sources(catalog, thresholds, tolerance, radius):
         The kept sources.
     k : float
         The measured peak noise (see peak_noise_factor).
+    keep : ndarray of bool, shape (n_sources,)
+        Which input rows were kept.
     """
     n_sources, n_epochs, _ = catalog.shape
     with np.errstate(all='ignore'):
@@ -337,12 +470,12 @@ def select_sources(catalog, thresholds, tolerance, radius):
         need = max(float(thresholds['epoch_fraction']) * n_epochs, epoch_min)
     remove(f"Detection (>= {need:.0f} epochs)", np.sum(np.isfinite(catalog[:, :, FLUX]), axis=1) >= need)
 
-    # A merged reference source (two sources the deep image could not split) is matched ambiguously in most epochs.
+    # A source ambiguous or blended (A) in many epochs is a pair the matching cannot separate.
     code = catalog[:, :, column_index('s_code')]
     ambiguous_fraction = float(thresholds['ambiguous_fraction'])
     with np.errstate(all='ignore'):
         ambiguous = np.sum(code == AMBIGUOUS, axis=1) / np.sum(np.isfinite(code), axis=1)
-    remove(f"Unblended (ambiguous <= {ambiguous_fraction * 100:.0f}%)", ambiguous <= ambiguous_fraction)
+    remove(f"Unblended (A <= {ambiguous_fraction * 100:.0f}%)", ambiguous <= ambiguous_fraction)
 
     flux_threshold, size_threshold = float(thresholds['flux_threshold']), float(thresholds['size_threshold'])
     with np.errstate(all='ignore'):
@@ -397,7 +530,7 @@ def select_sources(catalog, thresholds, tolerance, radius):
         msg(f"  {label:<34}" + "".join(f"{c:>10}" if c else f"{'.':>10}" for c in counts))
     for note in notes:
         msg(f"  {note}")
-    return catalog[keep], k
+    return catalog[keep], k, keep
 
 
 def drop_sparse_epochs(catalog, config):
@@ -407,7 +540,7 @@ def drop_sparse_epochs(catalog, config):
     The same epochs are removed from observation_properties.json and, for
     simulations, from per_epoch_offsets.csv, so all three stay aligned.
     """
-    minimum = config['THRESHOLDS'].get('min_sources_per_epoch', 10)
+    minimum = config['THRESHOLDS']['min_sources_per_epoch']
     sparse = np.sum(np.isfinite(catalog[:, :, RA]), axis=0) < minimum
     if not sparse.any():
         msg(f"Epoch filter (< {minimum} sources): no epochs removed")
@@ -440,11 +573,18 @@ def main():
     reference, epoch_files, ref_epoch = reference_catalogue(config)
     msg(f"Reference catalogue: {len(reference['ra_deg'])} sources")
 
-    # One row per reference source and one column per epoch; NaN where a source is not detected.
-    catalog = match_epochs(reference, epoch_files, ref_epoch, phase_centre,
-                           float(config['THRESHOLDS']['match_threshold']))
+    # One row per reference source and one column per epoch; NaN where a source is not detected. A deep
+    # reference is refined on a first match, as the stack can place it off its source; an epoch reference
+    # is already an epoch's own fit.
+    match_threshold = float(config['THRESHOLDS']['match_threshold'])
+    if ref_epoch is None:
+        catalog, ref_pos, original = two_pass_match(reference, epoch_files, phase_centre, match_threshold,
+                                                    int(config['THRESHOLDS']['epoch_min']))
+    else:
+        catalog = match_epochs(reference, epoch_files, ref_epoch, phase_centre, match_threshold)
+        ref_pos = original = np.column_stack([reference['ra_deg'], reference['dec_deg']])
     # Keep sources detected often enough and with steady flux, as variable sources make poor references.
-    catalog, k = select_sources(catalog, config['THRESHOLDS'], float(config['MCMC']['frequency_match_tolerance']),
+    catalog, k, keep = select_sources(catalog, config['THRESHOLDS'], float(config['MCMC']['frequency_match_tolerance']),
                                 float(config['MCMC']['max_phase_offset_deg']))
 
     # Epochs with too few sources cannot constrain their own translation in the fit.
@@ -453,9 +593,11 @@ def main():
     # The measured peak noise k is where fit.py starts its own.
     out_file = RESULTS_DIR / f"matched_catalog_{config['BOOKKEEPING']['project_name']}.npz"
     np.savez(out_file, data=catalog, columns=list(CATALOG_COLUMNS), shape=catalog.shape, peak_noise=k,
+             reference_ra_deg=ref_pos[keep, 0], reference_dec_deg=ref_pos[keep, 1],
+             original_ra_deg=original[keep, 0], original_dec_deg=original[keep, 1],
              description="AstKAT matched source catalogue (n_sources, n_epochs, n_columns); "
                          "snr is each detection's peak flux over its rms; peak_noise the measured k")
-    msg(f"Saved matched catalogue: {out_file} ({catalog.shape[0]} sources x {catalog.shape[1]} epochs)")
+    msg(f"Saved {out_file}: {catalog.shape[0]} sources x {catalog.shape[1]} epochs, peak noise k = {k:.3f}")
 
 
 if __name__ == "__main__":
