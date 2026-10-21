@@ -45,7 +45,7 @@ SUMMARY_FILE = RESULTS_DIR / 'offsets_summary.txt'
 
 MIN_SOURCES = 5                  # epochs with fewer fitted sources get no translation
 N_ITERATIONS = 10                # expectation-maximisation steps per posterior draw
-N_GRID = 300                     # points on which each epoch's expected residual distribution is evaluated
+N_BINS = 40                      # bins of each epoch's residual histograms, the same for every epoch
 
 
 # ============================================================================
@@ -104,7 +104,7 @@ def prepare_all_epochs(config, results):
                    source=source, epoch=epoch, var_min=var_min, var_maj=var_maj, u_min=u_min, u_maj=u_maj,
                    source_median=fitted['source_median'], pixel_arcsec=fitted['pixel_arcsec'],
                    catalog_sources=fitted['catalog_sources'], catalog_epochs=np.arange(catalog.shape[1]),
-                   rms=rms[valid])
+                   peak=peak[valid], rms=rms[valid])
 
     in_fit = np.zeros(catalog.shape[1], dtype=bool)
     in_fit[fitted['catalog_epochs']] = True
@@ -304,22 +304,23 @@ def offsets_affine(config, results, data, trans):
 
 def epoch_residuals(results, data, trans):
     """
-    Each measurement's offset from its fitted true position, and the distribution the model expects per epoch.
+    Each measurement's offset from its fitted true position, and the counts the model expects per epoch.
 
     For an epoch with translation tau, a measurement with RA-Dec noise
     variances (var_E, var_N) is expected at tau with the fit's mixture of an
-    inlier normal and an outlier normal lambda times wider. Summed over the
-    epoch's measurements this gives the expected number density of residuals
-    on each axis, which a histogram of the residuals should follow in both
-    position and width. Noise terms are at their posterior medians.
+    inlier normal and an outlier normal lambda times wider. Integrated over
+    each bin and summed over the epoch's measurements this gives the
+    expected count per bin on each axis, which a histogram of the residuals
+    over the same bins should follow in position, width and wings. Noise
+    terms are at their posterior medians.
 
     Returns
     -------
     dict
-        residual (n_obs, 2) in arcsec; grid (N_GRID,) of residual values in
+        residual (n_obs, 2) in arcsec; edges (N_BINS + 1,) of the bins in
         arcsec, symmetric about zero and shared by all epochs; expected
-        (n_epochs, 2, N_GRID), measurements per arcsec (NaN for epochs
-        without a translation).
+        (n_epochs, 2, N_BINS), measurements per bin (NaN for epochs without
+        a translation).
     """
     params = results['parameters']
     point = {name: params[name]['median'] if name in params else default
@@ -334,20 +335,71 @@ def epoch_residuals(results, data, trans):
     tau = trans['median']
     inlier = trans['p_outlier'] < 0.5
     half = 1.15 * max(np.percentile(np.abs(residual[inlier]), 99.5), np.nanmax(np.abs(tau) + trans['sd']))
-    grid = np.linspace(-half, half, N_GRID)
+    edges = np.linspace(-half, half, N_BINS + 1)
     f = params['outlier_fraction']['median'] if 'outlier_fraction' in params else 0.0
-    lam2 = params['outlier_scale']['median'] ** 2 if 'outlier_scale' in params else 1.0
+    lam = params['outlier_scale']['median'] if 'outlier_scale' in params else 1.0
 
-    expected = np.full((data.n_epochs, 2, N_GRID), np.nan)
+    expected = np.full((data.n_epochs, 2, N_BINS), np.nan)
     for e in np.nonzero(np.isfinite(tau[:, 0]))[0]:
         m = data.epoch == e
         for k in range(2):
-            d2 = (grid[None, :] - tau[e, k]) ** 2
-            s2 = var[m, k][:, None]
-            inl = np.exp(-0.5 * d2 / s2) / np.sqrt(2 * np.pi * s2)
-            out = np.exp(-0.5 * d2 / (lam2 * s2)) / np.sqrt(2 * np.pi * lam2 * s2)
-            expected[e, k] = np.sum((1 - f) * inl + f * out, axis=0)
-    return {'residual': residual, 'grid': grid, 'expected': expected}
+            z = (edges[None, :] - tau[e, k]) / np.sqrt(var[m, k])[:, None]
+            cdf = (1 - f) * ndtr(z) + f * ndtr(z / lam)
+            expected[e, k] = np.sum(np.diff(cdf, axis=1), axis=0)
+    return {'residual': residual, 'edges': edges, 'expected': expected}
+
+
+def epoch_flux_residuals(results, data):
+    """
+    Each measured peak over its fitted flux density, minus one, and the counts the model expects per fitted epoch.
+
+    A detection of source j in epoch e has peak p ~ N(S_j (1 + g_e), sigma_p)
+    with sigma_p = sqrt((k rms)^2 + (f_frac S_j (1 + g_e))^2), as in the fit,
+    so x = p / S_j - 1 ~ N(g_e, sigma_p / S_j). Only peaks at or above the
+    censoring threshold (the fit's flux_censor_snr) are measured, so each
+    detection's normal is truncated there and renormalised. Integrated over
+    each bin and summed over the epoch's measured peaks this gives the
+    expected count per bin, at the posterior medians. Epochs outside the fit
+    have no fitted g_e and are left out.
+
+    Returns
+    -------
+    dict or None
+        residual (n_obs,); measured (n_obs,) bool, the peaks used; edges
+        (N_BINS + 1,), symmetric about zero and shared by all epochs;
+        expected (n_epochs, N_BINS), NaN for epochs without a fitted g_e;
+        scale, scale_sd (n_epochs,) of g_e. None without fitted flux
+        densities and flux scales.
+    """
+    if results['source_flux'] is None or results['flux_scale'] is None:
+        return None
+    params = results['parameters']
+    k = params['peak_noise']['median']
+    ffrac = params['flux_fractional']['median'] if 'flux_fractional' in params else 0.0
+    threshold = results['model']['detection'][0]
+    scale = results['flux_scale']
+    g, g_sd = np.full(data.n_epochs, np.nan), np.full(data.n_epochs, np.nan)
+    g[scale['catalog_epochs']], g_sd[scale['catalog_epochs']] = scale['median'], scale['sd']
+
+    flux = results['source_flux']['median'][data.source]
+    ge = g[data.epoch]
+    residual = data.peak / flux - 1.0
+    measured = (data.peak >= threshold * data.rms) & np.isfinite(ge)
+    width = np.hypot(k * data.rms, ffrac * flux * (1.0 + ge)) / flux
+    lowest = threshold * data.rms / flux - 1.0
+
+    half = 1.15 * max(np.percentile(np.abs(residual[measured]), 99.5), np.nanmax(np.abs(g) + g_sd))
+    edges = np.linspace(-half, half, N_BINS + 1)
+    expected = np.full((data.n_epochs, N_BINS), np.nan)
+    for e in np.nonzero(np.isfinite(g))[0]:
+        m = measured & (data.epoch == e)
+        z_low = (lowest[m] - g[e]) / width[m]
+        z = np.maximum((edges[None, :] - g[e]) / width[m][:, None], z_low[:, None])
+        expected[e] = np.sum(np.diff(ndtr(z), axis=1) / (1.0 - ndtr(z_low))[:, None], axis=0)
+    msg(f"Flux residuals: {int(measured.sum())} peaks at or above {threshold:g} rms in "
+        f"{int(np.isfinite(g).sum())} fitted epochs; {int((~np.isfinite(g)).sum())} epochs outside the fit left out")
+    return {'residual': residual, 'measured': measured, 'edges': edges, 'expected': expected,
+            'scale': g, 'scale_sd': g_sd}
 
 
 # ============================================================================
@@ -718,7 +770,7 @@ def write_offsets_summary(offsets):
     msg(f"Readable offsets summary saved to {SUMMARY_FILE}")
 
 
-def save_offsets_results(results, data, trans, meta, affine, residuals, truth, truth_sources=None):
+def save_offsets_results(results, data, trans, meta, affine, residuals, flux_residuals, truth, truth_sources=None):
     """
     Save everything later steps and figures need to results/offsets_results.pkl (plain types only).
 
@@ -729,7 +781,8 @@ def save_offsets_results(results, data, trans, meta, affine, residuals, truth, t
     """
     out = {'created': Time.now().isot[:19], 'fit_created': results['created'], 'model': results['model'],
            'data': asdict(data), 'translations': trans, 'epochs': meta, 'affine': affine,
-           'residuals': residuals, 'truth': truth, 'truth_sources': truth_sources}
+           'residuals': residuals, 'flux_residuals': flux_residuals, 'truth': truth,
+           'truth_sources': truth_sources}
     with open(OFFSETS_RESULTS_FILE, 'wb') as f:
         pickle.dump(out, f, protocol=pickle.HIGHEST_PROTOCOL)
     msg(f"Offsets results saved to {OFFSETS_RESULTS_FILE}")
@@ -790,9 +843,10 @@ def main():
     trans = all_epoch_translations(data, in_fit, results['model'], draws, rng)
 
     # 3. The fit's affine check repeated over every epoch, added epochs included, and each
-    #    epoch's residuals with the distribution the model expects for them.
+    #    epoch's position and flux residuals with the counts the model expects for them.
     affine = offsets_affine(config, results, data, trans)
     residuals = epoch_residuals(results, data, trans)
+    flux_residuals = epoch_flux_residuals(results, data)
 
     # 4. For simulations, the translations against the injected offsets.
     path = truth_file(args, config)
@@ -807,7 +861,8 @@ def main():
     # 5. Outputs; the npz file is what corrects a target in any epoch.
     meta = epoch_metadata(data)
     write_translations(trans, meta)
-    offsets = save_offsets_results(results, data, trans, meta, affine, residuals, truth, truth_sources)
+    offsets = save_offsets_results(results, data, trans, meta, affine, residuals, flux_residuals, truth,
+                                   truth_sources)
     write_offsets_summary(offsets)
 
     # 6. Figures; epochs added after the fit are drawn as stars.

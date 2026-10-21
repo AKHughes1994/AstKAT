@@ -910,24 +910,22 @@ def fit_diagnostics(results):
     msg(f"Fit figures written to {PLOTS_DIR}/" if figures else "No fit figures defined in plot.py")
 
 
-def epoch_histograms(offsets, n_bins=40):
+def epoch_histograms(offsets):
     """
-    One figure per epoch: its residuals against the translation and the model's expectation.
+    One figure per epoch: its residuals against the translation and the counts the model expects.
 
-    Right ascension and declination panels share one x-range across all epochs. Each shows a
+    Right ascension and declination panels share one set of bins across all epochs. Each shows a
     histogram of the epoch's residuals from the fitted true positions
-    (inliers in blue, outliers stacked in navy), the distribution the model
-    expects for them, and the epoch's translation with its 1-sigma band.
-    Added epochs are named as such in the title. Written to
+    (inliers in blue, outliers stacked in navy), the model's expected count
+    in each bin (solid steps), and the epoch's translation (dash-dot) with
+    its 1-sigma band. Added epochs are named as such in the title. Written to
     plots/offsets_epoch_histograms/epoch_{n}.
     """
     trans, res = offsets['translations'], offsets['residuals']
     data, meta = offsets['data'], offsets['epochs']
     epoch = np.asarray(data['epoch'])
     inlier = np.asarray(trans['p_outlier']) < 0.5
-    grid = res['grid'] * 1e3
-    bins = np.linspace(grid[0], grid[-1], n_bins + 1)
-    to_counts = (bins[1] - bins[0]) * 1e-3                                  # expected per arcsec -> per bin
+    edges = res['edges'] * 1e3
     labels = (r'Right ascension offset $\Delta\alpha\cos\delta$ (mas)', r'Declination offset $\Delta\delta$ (mas)')
     obs_isot = meta.get('obs_isot') or [''] * len(trans['median'])
     n_drawn = 0
@@ -937,16 +935,15 @@ def epoch_histograms(offsets, n_bins=40):
         fig, axes = plt.subplots(1, 2, figsize=(7.0, 3.0), gridspec_kw={'wspace': 0.25})
         for k, (ax, label) in enumerate(zip(axes, labels)):
             r = res['residual'][m, k] * 1e3
-            ax.hist([r[inlier[m]], r[~inlier[m]]], bins=bins, stacked=True, histtype='bar',
+            ax.hist([r[inlier[m]], r[~inlier[m]]], bins=edges, stacked=True, histtype='bar',
                     color=[plt.get_cmap(COLOUR_MAP)(0.45), 'navy'], edgecolor=DATA_COLOUR, linewidth=0.4,
                     label=['Inliers', 'Outliers'])
-            ax.plot(grid, res['expected'][e, k] * to_counts, '-', color=POSTERIOR_LINE_COLOUR, lw=1.2,
-                    label='Model')
+            ax.stairs(res['expected'][e, k], edges, color=POSTERIOR_LINE_COLOUR, lw=1.2, label='Model')
             tau, sd = trans['median'][e, k] * 1e3, trans['sd'][e, k] * 1e3
             ax.axvspan(tau - sd, tau + sd, color='lightblue', alpha=0.5, lw=0, zorder=0)
-            ax.axvline(tau, color=POSTERIOR_LINE_COLOUR, lw=1.0, label='Translation')
+            ax.axvline(tau, color=POSTERIOR_LINE_COLOUR, lw=1.0, ls='-.', label='Translation')
             ax.axvline(0, color='0.4', lw=0.8, ls='--', zorder=0)
-            ax.set_xlim(grid[0], grid[-1])
+            ax.set_xlim(edges[0], edges[-1])
             ax.set_xlabel(label)
         axes[0].set_ylabel('Measurements')
         axes[1].legend(loc='upper right', fontsize=7)
@@ -955,6 +952,45 @@ def epoch_histograms(offsets, n_bins=40):
         save_figure(fig, f'offsets_epoch_histograms/epoch_{e:03d}', formats=EPOCH_FORMATS, quiet=True)
         n_drawn += 1
     msg(f"Per-epoch histograms written for {n_drawn} epochs to {PLOTS_DIR / 'offsets_epoch_histograms'}/")
+
+
+def epoch_flux_histograms(offsets):
+    """
+    One figure per fitted epoch: its measured peaks over the fitted flux densities against the flux scale g_e.
+
+    A histogram of p / S_j - 1 in per cent for the epoch's peaks at or
+    above the censoring threshold, the model's expected count in each bin
+    (solid steps; each detection's normal truncated at the threshold, see
+    offsets.epoch_flux_residuals), and g_e (dash-dot) with its 1-sigma band.
+    The bins are shared across epochs. Written to
+    plots/offsets_epoch_flux_histograms/epoch_{n}.
+    """
+    res = offsets['flux_residuals']
+    if res is None:
+        return
+    epoch = np.asarray(offsets['data']['epoch'])
+    obs_isot = offsets['epochs'].get('obs_isot') or [''] * len(res['scale'])
+    edges = res['edges'] * 100
+    n_drawn = 0
+    for e in np.nonzero(np.isfinite(res['scale']))[0]:
+        m = res['measured'] & (epoch == e)
+        fig, ax = plt.subplots(figsize=(4.2, 3.0))
+        ax.hist(res['residual'][m] * 100, bins=edges, histtype='bar', color=plt.get_cmap(COLOUR_MAP)(0.45),
+                edgecolor=DATA_COLOUR, linewidth=0.4, label='Measured peaks')
+        ax.stairs(res['expected'][e], edges, color=POSTERIOR_LINE_COLOUR, lw=1.2, label='Model')
+        g, sd = res['scale'][e] * 100, res['scale_sd'][e] * 100
+        ax.axvspan(g - sd, g + sd, color='lightblue', alpha=0.5, lw=0, zorder=0)
+        ax.axvline(g, color=POSTERIOR_LINE_COLOUR, lw=1.0, ls='-.', label=r'Flux scale $g_e$')
+        ax.axvline(0, color='0.4', lw=0.8, ls='--', zorder=0)
+        ax.set_xlim(edges[0], edges[-1])
+        ax.set_xlabel(r'Peak over fitted flux density $p / S_j - 1$ (%)')
+        ax.set_ylabel('Measurements')
+        ax.legend(loc='upper right', fontsize=7)
+        fig.suptitle(f'Epoch {e}, {obs_isot[e][:10]}, {int(m.sum())} measured peaks', fontsize=10)
+        save_figure(fig, f'offsets_epoch_flux_histograms/epoch_{e:03d}', formats=EPOCH_FORMATS, quiet=True)
+        n_drawn += 1
+    msg(f"Per-epoch flux histograms written for {n_drawn} fitted epochs to "
+        f"{PLOTS_DIR / 'offsets_epoch_flux_histograms'}/")
 
 
 def truth_figure(offsets):
@@ -1243,7 +1279,8 @@ def offsets_figures(offsets):
     Epochs added after the fit are drawn as stars (dotted in the ellipse
     figure). Written to plots/offsets_epoch_translations,
     offsets_translation_plane, offsets_affine and offsets_affine_ellipses,
-    plus one histogram per epoch in plots/offsets_epoch_histograms/ and, for
+    plus one histogram per epoch in plots/offsets_epoch_histograms/, one flux histogram per fitted
+    epoch in plots/offsets_epoch_flux_histograms/ and, for
     simulations, plots/offsets_truth, offsets_truth_sources and offsets_completeness.
 
     Parameters
@@ -1259,6 +1296,7 @@ def offsets_figures(offsets):
     _affine(offsets['affine'], trans, 'offsets_affine', added)
     _affine_ellipses(offsets['affine'], trans, 'offsets_affine_ellipses', added)
     epoch_histograms(offsets)
+    epoch_flux_histograms(offsets)
     if offsets.get('truth'):
         truth_figure(offsets)
     if offsets.get('truth_sources'):
