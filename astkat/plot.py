@@ -10,6 +10,7 @@ Used by
     fit.py        fit_diagnostics
     offsets.py    offsets_figures
     target.py     target_figure
+    simulate.py   simulation_noise_figure
 """
 
 from pathlib import Path
@@ -1266,6 +1267,77 @@ def target_figure(target):
     side[-1].set_xlabel('Observation epoch (MJD)')
 
     save_figure(fig, f"target_{target['stem']}")
+
+
+# ============================================================================
+# SIMULATION
+# ============================================================================
+
+def simulation_noise_figure(check):
+    """
+    Autocorrelation of the simulated noise against the beam, from simulate.py noise mode.
+
+    First panel: the first epoch's noise autocorrelation coefficient rho on
+    the sky (right ascension increasing to the left), with the 50% contours
+    of the measurement, the beam and the beam self-convolution (white noise
+    convolved with the full beam). Second and third: rho along that epoch's
+    beam major and minor axes against the same two expectations. Fourth: for
+    every epoch, the fitted noise correlation FWHM over the beam FWHM along
+    each axis, 1 when the noise autocorrelation is the beam and sqrt(2) for
+    the beam self-convolution. Written to plots/simulate_noise_correlation.
+
+    Parameters
+    ----------
+    check : dict
+        From simulate.noise_correlation_check for the first epoch, with
+        'epochs' (n,) and 'ratio' (n, 2), major and minor, added for all epochs.
+    """
+    set_style()
+    fig, axes = plt.subplots(1, 4, figsize=(18.0, 4.4), gridspec_kw={'wspace': 0.45})
+
+    # Autocorrelation map; columns run West, so the left edge is the largest right ascension offset.
+    ax = axes[0]
+    d_ra, d_dec, rho = check['d_ra'], check['d_dec'], check['rho']
+    half = 0.5 * check['pixel_scale']
+    extent = [d_ra.max() + half, d_ra.min() - half, d_dec.min() - half, d_dec.max() + half]
+    image = ax.imshow(rho, origin='lower', extent=extent, cmap=COLOUR_MAP, vmin=min(0.0, rho.min()), vmax=1.0)
+    ax.contour(d_ra, d_dec, rho, levels=[0.5], colors=DATA_COLOUR, linewidths=1.2)
+    ax.contour(d_ra, d_dec, check['beam_rho'], levels=[0.5], colors=HIGHLIGHT_COLOUR, linewidths=1.2)
+    ax.contour(d_ra, d_dec, check['self_rho'], levels=[0.5], colors=MUTED_COLOUR, linewidths=1.2,
+               linestyles='--')
+    cbar = fig.colorbar(image, ax=ax, fraction=0.046, pad=0.03)
+    cbar.set_label(r'$\rho$', rotation=270, labelpad=14)
+    cbar.ax.tick_params(which='both', direction='in')
+    ax.set_xlabel('Right ascension offset (arcsec)')
+    ax.set_ylabel('Declination offset (arcsec)')
+
+    for ax, name in zip(axes[1:3], ('major', 'minor')):
+        cut = check['cuts'][name]
+        ax.axhline(0.0, color='0.4', lw=0.6, ls=':', zorder=0)
+        ax.plot(cut['offset'], cut['beam'], '-', color=HIGHLIGHT_COLOUR, lw=1.3, zorder=2, label='Beam')
+        ax.plot(cut['offset'], cut['self'], '--', color=MUTED_COLOUR, lw=1.3, zorder=2,
+                label='Beam self-convolution')
+        ax.plot(cut['offset'], cut['measured'], '.', ms=4, color=DATA_COLOUR, zorder=3, label='Simulated noise')
+        ax.set_xlim(cut['offset'][0], cut['offset'][-1])
+        ax.set_xlabel(f'Offset along beam {name} axis (arcsec)')
+        ax.set_ylabel(r'$\rho$')
+
+    ax = axes[3]
+    ax.axhline(1.0, color='0.4', lw=0.8, ls='--', zorder=0)
+    ax.axhline(np.sqrt(2.0), color='0.4', lw=0.8, ls=':', zorder=0)
+    ax.plot(check['epochs'], check['ratio'][:, 0], '.', ms=4, color=DATA_COLOUR, zorder=2, label='Major axis')
+    ax.plot(check['epochs'], check['ratio'][:, 1], '.', ms=4, color=MUTED_COLOUR, zorder=2, label='Minor axis')
+    ax.set_ylim(0.8, 1.55)
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('Noise correlation FWHM / beam FWHM')
+
+    # One legend above all panels, outside the plot areas.
+    handles, labels = axes[1].get_legend_handles_labels()
+    more_handles, more_labels = axes[3].get_legend_handles_labels()
+    fig.legend(handles + more_handles, labels + more_labels, loc='lower center', bbox_to_anchor=(0.5, 0.98),
+               ncol=len(handles) + len(more_handles))
+
+    save_figure(fig, 'simulate_noise_correlation')
 
 
 # ============================================================================

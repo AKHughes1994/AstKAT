@@ -7,8 +7,9 @@ astrometric errors and known per-epoch translations, for testing the
 pipeline end to end.
 
 Modes
-    noise   realistic images: beam-correlated noise, the systematic floor B
-            injected, and the SNR-dependent error left to PyBDSF's own fitting
+    noise   realistic images: noise whose autocorrelation is the beam, the
+            systematic floor B injected, and the SNR-dependent error left to
+            PyBDSF's own fitting
     flat    a flat background with every error injected directly:
             sigma = sqrt(s^2 + B^2) in beam units, with
             s = A SNR^-beta [(1 + SNR_b / SNR) / (1 + SNR_b)]^gamma (A at SNR 1),
@@ -47,6 +48,10 @@ Writes, in the output directory
     target mode instead
     target_trajectory.txt             the target catalogue, input to target.py
     target_trajectory_truth.csv       true track and injected translation per epoch
+
+Writes, in plots/ of the working directory
+    noise mode with correlated noise
+    simulate_noise_correlation.pdf/.png   the simulated noise autocorrelation against the beam
 """
 
 import argparse
@@ -65,16 +70,20 @@ from astropy.table import QTable
 from astropy.time import Time
 from astropy.wcs import WCS
 from photutils.datasets import make_model_image
+from scipy.ndimage import label, map_coordinates
+from scipy.optimize import curve_fit
 from scipy.signal import fftconvolve
 
 try:
     from .utils import msg, title, DEFAULT_SEED, SIMULATION_TRUTH_FILE, CATALOG_COLUMNS, S_CODES, \
         PYBDSF_SNR_THRESHOLD
     from .extraction import image_properties
+    from .plot import simulation_noise_figure
 except ImportError:
     from utils import msg, title, DEFAULT_SEED, SIMULATION_TRUTH_FILE, CATALOG_COLUMNS, S_CODES, \
         PYBDSF_SNR_THRESHOLD
     from extraction import image_properties
+    from plot import simulation_noise_figure
 
 
 # Per-mode settings: beam size limits, file prefix and default output directory.
@@ -111,6 +120,10 @@ FREQ_HZ = 1.284e9                # MeerKAT L band
 BANDWIDTH_HZ = 856e6
 BAD_FREQ_FACTOR = 10.0           # frequency of the deliberately wrong epochs (--n-bad-freq-epochs)
 FWHM_TO_SIGMA = 1.0 / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+
+NOISE_CHECK_SIZE = 512           # noise mode: central pixels per side whose autocorrelation is checked
+NOISE_CHECK_MAX_LAG = 3.0        # largest lag checked, in units of BMAJ
+NOISE_CHECK_LOBE = 0.2           # the connected region above this rho around zero lag is fitted
 
 
 # ============================================================================
@@ -270,15 +283,156 @@ def fits_header(beam, centre, image_size, epoch, frequency_hz, mode, cadence_day
 
 
 def correlated_noise(rng, image_size, beam, rms, correlated=True):
-    """Gaussian noise of the given RMS, smoothed by the beam unless correlated is False."""
+    """
+    Gaussian noise of the given RMS whose autocorrelation is the beam, or white if correlated is False.
+
+    White noise convolved with a Gaussian kernel of covariance K has
+    autocorrelation of covariance 2 K, so the kernel has the beam's
+    orientation and each axis's sigma divided by sqrt(2). An interferometer's
+    thermal noise has the PSF as its autocorrelation, here the Gaussian beam.
+    """
     noise = rng.standard_normal((image_size, image_size))
     if correlated:
         size = max(51, int(6 * max(beam['bmaj_sigma'], beam['bmin_sigma']))) | 1
-        kernel = Gaussian2DKernel(x_stddev=beam['bmaj_sigma'], y_stddev=beam['bmin_sigma'],
+        kernel = Gaussian2DKernel(x_stddev=beam['bmaj_sigma'] / np.sqrt(2.0),
+                                  y_stddev=beam['bmin_sigma'] / np.sqrt(2.0),
                                   theta=np.radians(beam['bpa_deg'] + 90), x_size=size, y_size=size,
                                   mode='center').array
         noise = fftconvolve(noise, kernel, mode='same')
     return noise / np.sqrt(np.mean(noise ** 2)) * rms
+
+
+def noise_autocorrelation(field, max_lag_pix):
+    """
+    Unbiased autocorrelation coefficient of a mean-subtracted square field.
+
+    Zero-padding to twice the field size removes circular wrap-around, and
+    dividing by the number of pixel pairs at each lag removes the taper of
+    the raw sum toward large lags.
+
+    Parameters
+    ----------
+    field : ndarray, shape (n, n)
+        Pixel values.
+    max_lag_pix : int
+        Largest lag L kept along each axis, in pixels.
+
+    Returns
+    -------
+    ndarray, shape (2 L + 1, 2 L + 1)
+        Correlation coefficient indexed [dy, dx], 1 at zero lag in the centre.
+    """
+    n = field.shape[0]
+    residual = field - field.mean()
+    shape = (2 * n, 2 * n)
+    acf = np.fft.fftshift(np.fft.irfft2(np.abs(np.fft.rfft2(residual, s=shape)) ** 2, s=shape))
+    pairs = np.fft.fftshift(np.fft.irfft2(np.abs(np.fft.rfft2(np.ones_like(residual), s=shape)) ** 2, s=shape))
+    # Zero lag sits at index n after the shift
+    window = slice(n - max_lag_pix, n + max_lag_pix + 1)
+    acf = acf[window, window] / np.round(pairs[window, window])
+    return acf / acf[max_lag_pix, max_lag_pix]
+
+
+def pixel_covariance(fwhm_major, fwhm_minor, pa_deg):
+    """
+    Covariance of an elliptical Gaussian in pixel coordinates (x West, y North).
+
+    Parameters
+    ----------
+    fwhm_major, fwhm_minor : float
+        FWHM along each axis, pixels.
+    pa_deg : float
+        Position angle of the major axis, degrees East of North.
+
+    Returns
+    -------
+    ndarray, shape (2, 2)
+        Covariance in pixels^2.
+    """
+    t = np.radians(pa_deg + 90.0)
+    u_major, u_minor = np.array([np.cos(t), np.sin(t)]), np.array([-np.sin(t), np.cos(t)])
+    return ((fwhm_major * FWHM_TO_SIGMA) ** 2 * np.outer(u_major, u_major)
+            + (fwhm_minor * FWHM_TO_SIGMA) ** 2 * np.outer(u_minor, u_minor))
+
+
+def gaussian_map(dx, dy, cov):
+    """Unit-peak Gaussian exp(-1/2 d^T cov^-1 d) at pixel offsets (dx, dy), any matching shape."""
+    inv = np.linalg.inv(cov)
+    return np.exp(-0.5 * (inv[0, 0] * dx ** 2 + 2.0 * inv[0, 1] * dx * dy + inv[1, 1] * dy ** 2))
+
+
+def noise_correlation_check(noise, beam, keep_maps=False):
+    """
+    Autocorrelation of the centre of an epoch's noise field, fitted and compared with its beam.
+
+    The autocorrelation of the central NOISE_CHECK_SIZE pixels is computed out
+    to NOISE_CHECK_MAX_LAG BMAJ, and an elliptical Gaussian is fitted to its
+    central lobe, the connected region above NOISE_CHECK_LOBE containing zero
+    lag, starting from the beam.
+
+    Parameters
+    ----------
+    noise : ndarray, shape (n, n)
+        The epoch's noise field, before sources are added.
+    beam : dict
+        The epoch's beam, from make_beam.
+    keep_maps : bool
+        Also return the maps and beam-axis cuts that plot.simulation_noise_figure draws.
+
+    Returns
+    -------
+    dict
+        fwhm_pixels : ndarray, shape (2,)
+            Fitted noise correlation FWHM, major and minor.
+        pa_deg : float
+            Its position angle, degrees East of North, in [-90, 90).
+        ratio : ndarray, shape (2,)
+            fwhm_pixels over the beam FWHM, major and minor; 1 when the
+            autocorrelation is the beam.
+        With keep_maps, also rho, beam_rho and self_rho (2 L + 1, 2 L + 1),
+        the measured map and the beam and beam self-convolution expectations;
+        d_ra and d_dec, each lag's offset in arcsec; cuts, for 'major' and
+        'minor' the offsets in arcsec and rho measured, for the beam and for
+        the self-convolution; pixel_scale.
+    """
+    size = min(NOISE_CHECK_SIZE, noise.shape[0])
+    start = (noise.shape[0] - size) // 2
+    field = noise[start:start + size, start:start + size]
+    max_lag = min(int(np.ceil(NOISE_CHECK_MAX_LAG * beam['bmaj_pixels'])), size // 4)
+    rho = noise_autocorrelation(field, max_lag)
+    lags = np.arange(-max_lag, max_lag + 1)
+    dx, dy = np.meshgrid(lags, lags)
+
+    labels, _ = label(rho > NOISE_CHECK_LOBE)
+    lobe = labels == labels[max_lag, max_lag]
+
+    def model(coords, amplitude, fwhm_a, fwhm_b, pa):
+        return amplitude * gaussian_map(coords[0], coords[1], pixel_covariance(abs(fwhm_a), abs(fwhm_b), pa))
+
+    p0 = [1.0, beam['bmaj_pixels'], beam['bmin_pixels'], beam['bpa_deg']]
+    (_, fwhm_a, fwhm_b, pa), _ = curve_fit(model, (dx[lobe], dy[lobe]), rho[lobe], p0=p0)
+    # Major axis first, its angle in [-90, 90) as the beams are drawn
+    fwhm_a, fwhm_b = abs(fwhm_a), abs(fwhm_b)
+    if fwhm_b > fwhm_a:
+        fwhm_a, fwhm_b, pa = fwhm_b, fwhm_a, pa + 90.0
+    fwhm = np.array([fwhm_a, fwhm_b])
+    result = {'fwhm_pixels': fwhm, 'pa_deg': ((pa + 90.0) % 180.0) - 90.0,
+              'ratio': fwhm / np.array([beam['bmaj_pixels'], beam['bmin_pixels']])}
+
+    if keep_maps:
+        beam_cov = pixel_covariance(beam['bmaj_pixels'], beam['bmin_pixels'], beam['bpa_deg'])
+        t = np.radians(beam['bpa_deg'] + 90.0)
+        steps = np.arange(-max_lag, max_lag + 1, dtype=float)
+        cuts = {}
+        for name, angle, sigma in (('major', t, beam['bmaj_sigma']), ('minor', t + 0.5 * np.pi, beam['bmin_sigma'])):
+            # Bilinear samples along the axis through zero lag, rho indexed [dy, dx]
+            measured = map_coordinates(rho, [max_lag + steps * np.sin(angle), max_lag + steps * np.cos(angle)],
+                                       order=1)
+            cuts[name] = {'offset': steps * PIXEL_SCALE, 'measured': measured,
+                          'beam': np.exp(-0.5 * (steps / sigma) ** 2), 'self': np.exp(-0.25 * (steps / sigma) ** 2)}
+        result.update(rho=rho, beam_rho=gaussian_map(dx, dy, beam_cov), self_rho=gaussian_map(dx, dy, 2.0 * beam_cov),
+                      d_ra=-dx * PIXEL_SCALE, d_dec=dy * PIXEL_SCALE, cuts=cuts, pixel_scale=PIXEL_SCALE)
+    return result
 
 
 def render_sources(x, y, amplitudes, beam, image_size):
@@ -361,9 +515,10 @@ def run_simulation(args):
     msg(f"Field centre RA {centre[0]:.4f}, Dec {centre[1]:.4f} deg; SNR {snr.min():.1f} to {snr.max():.1f}"
         + ("" if flat else f"; field RMS {field_rms:.3f}"))
 
-    epochs, rows, paths = [], [], []
+    epochs, rows, paths, noise_checks = [], [], [], []
     for e in range(n_total):
         beam = beams[e]
+        noise_check = None
         frequency = FREQ_HZ * (BAD_FREQ_FACTOR if e >= args.n_images else 1.0)
 
         # Noise mode: the epoch's RMS varies, so each source's SNR does too.
@@ -387,8 +542,15 @@ def run_simulation(args):
         y = y_true + dy + north / PIXEL_SCALE
 
         image = render_sources(x, y, peak, beam, args.image_size)
-        image += (rng.normal(FLAT_BACKGROUND, FLAT_BACKGROUND_SIGMA, image.shape) if flat
-                  else correlated_noise(rng, args.image_size, beam, rms, not args.no_spatial_correlation))
+        if flat:
+            image += rng.normal(FLAT_BACKGROUND, FLAT_BACKGROUND_SIGMA, image.shape)
+        else:
+            noise = correlated_noise(rng, args.image_size, beam, rms, not args.no_spatial_correlation)
+            image += noise
+            # The noise autocorrelation against the beam, checked before sources are added
+            if not args.no_spatial_correlation:
+                noise_check = noise_correlation_check(noise, beam, keep_maps=not noise_checks)
+                noise_checks.append(noise_check)
         gain = 1.0 + flux_scale[e]
         image *= gain
         # The epoch's rms scales with the gain; flat images record it in NOISE, which extraction.py reads.
@@ -405,10 +567,14 @@ def run_simulation(args):
         epochs.append({'epoch_index': e, 'frequency_hz': frequency, 'rms_noise': rms,
                        'global_x_offset_arcsec': east, 'global_y_offset_arcsec': north,
                        'flux_scale': float(flux_scale[e]),
-                       'median_snr': float(np.median(epoch_snr)), 'beam_parameters': beam})
+                       'median_snr': float(np.median(epoch_snr)), 'beam_parameters': beam,
+                       **({'noise_correlation_fwhm_pixels': [float(v) for v in noise_check['fwhm_pixels']],
+                           'noise_correlation_pa_deg': float(noise_check['pa_deg'])} if noise_check else {})})
         msg(f"Epoch {e:04d}: beam {beam['bmaj_pixels']:.1f} x {beam['bmin_pixels']:.1f} px at "
             f"{beam['bpa_deg']:.0f} deg, translation ({east:+.3f}, {north:+.3f})\", flux scale {gain:.3f}"
             + (f", RMS {rms:.2f}" if rms is not None else "")
+            + (f", noise correlation / beam FWHM {noise_check['ratio'][0]:.2f} major, "
+               f"{noise_check['ratio'][1]:.2f} minor" if noise_check else "")
             # Flat and catalogue: the realised peak scatter in rms before the flux scale; k when f_frac = 0.
             + (f", peak scatter {np.std(peak - fluxes) / field_rms:.3f} rms" if flat else "")
             + (f", {np.mean(peak >= CATALOGUE_DETECTION_SNR * field_rms) * 100:.1f}% detected" if catalogue else "")
@@ -432,6 +598,12 @@ def run_simulation(args):
     }, epochs)
     if catalogue:
         write_catalogue(output_dir, np.stack(rows, axis=1), paths)
+    if noise_checks:
+        ratio = np.array([c['ratio'] for c in noise_checks])
+        msg(f"Noise correlation / beam FWHM over {len(noise_checks)} epochs: major {np.median(ratio[:, 0]):.3f}, "
+            f"minor {np.median(ratio[:, 1]):.3f} (median; 1 for the beam, {np.sqrt(2.0):.3f} for the beam "
+            f"self-convolution)")
+        simulation_noise_figure(dict(noise_checks[0], epochs=np.arange(len(noise_checks)), ratio=ratio))
     title(f"AstKAT simulation complete: {n_total} images in {output_dir}")
 
 
