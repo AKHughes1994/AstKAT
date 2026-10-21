@@ -643,12 +643,11 @@ def build_priors(data, priors, opts):
         k = pm.LogNormal('peak_noise', mu=0.0, sigma=float(priors['peak_noise']), initval=opts['peak_noise_start'])
         # Each epoch's flux-scale (gain) error g_e multiplies its peaks and its rms alike, shared by every
         # source, so the SNR is S (1 + g_e) / rms. The scales sum to zero: the flux densities set the overall
-        # scale. Their spread f_sys is half-normal; non-centred (unit scales times f_sys) so a small spread
-        # does not squeeze the sampler into a funnel.
+        # scale. Their spread f_sys is half-normal. Each g_e is measured by its epoch's many sources, so the
+        # scales are sampled directly (centred); scaled unit variables would tie f_sys to every g_e at once.
         if opts['fit_fsys']:
             fsys = pm.HalfNormal('flux_systematic', sigma=float(priors['flux_systematic']), initval=0.02)
-            unit = pm.ZeroSumNormal('flux_scale_unit', sigma=1.0, shape=data.n_epochs)
-            gain = 1.0 + pm.Deterministic('flux_scale', fsys * unit)
+            gain = 1.0 + pm.ZeroSumNormal('flux_scale', sigma=fsys, shape=data.n_epochs)
         else:
             gain = pt.ones(data.n_epochs)
         snr = flux[data.source] * gain[data.epoch] / data.rms
@@ -864,9 +863,9 @@ def log_model_summary(model, data, opts):
     point = model.initial_point()
     sizes = {rv.name: int(point[model.rvs_to_values[rv].name].size) for rv in model.free_RVs}
     n_pos, n_tau, n_flux = sizes['delta'], sizes.get('tau', 0), sizes.get('source_flux', 0)
-    n_scale = sizes.get('flux_scale_unit', 0)
+    n_scale = sizes.get('flux_scale', 0)
     astro = [SCALAR_NAMES[n] for n in sizes
-             if n not in ('delta', 'tau', 'source_flux', 'flux_scale_unit') + FLUX_SCALARS]
+             if n not in ('delta', 'tau', 'source_flux', 'flux_scale') + FLUX_SCALARS]
     flux = [SCALAR_NAMES[n] for n in sizes if n in FLUX_SCALARS]
     n_coords, n_astro = 2 * data.n_obs, n_pos + n_tau + len(astro)
 
@@ -1035,7 +1034,7 @@ def check_convergence(idata):
     msg(f"  Worst R-hat over true positions and translations: {rhat_bulk:.3f}"
         + ("  WARNING" if rhat_bulk > 1.01 else ""))
     if rhat_flux is not None:
-        msg(f"  Worst R-hat over source flux densities: {rhat_flux:.3f}" + ("  WARNING" if rhat_flux > 1.01 else ""))
+        msg(f"  Worst R-hat over source flux densities and epoch flux scales: {rhat_flux:.3f}" + ("  WARNING" if rhat_flux > 1.01 else ""))
     msg(f"  Divergent transitions: {divergences}" + ("  WARNING" if divergences else ""))
     # Chains settled on different solutions, most likely the inlier and outlier components swapped.
     split = [n for n in ('outlier_fraction', 'A', 'B') if n in report['parameters']
