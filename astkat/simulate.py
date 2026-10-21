@@ -607,10 +607,12 @@ def parse_args():
     parser.add_argument('-o', '--output-dir', default=None,
                         help='output directory (default: sim_images, sim_images_flat, sim_catalogue or '
                              'sim_target)')
-    parser.add_argument('-s', '--image-size', type=int, default=IMAGE_SIZE, help='pixels per side')
+    parser.add_argument('-s', '--image-size', type=int, default=IMAGE_SIZE,
+                        help=f'pixels per side (default {IMAGE_SIZE})')
     parser.add_argument('-i', '--n-images', type=int, default=N_IMAGES,
-                        help="number of epochs (target mode: at most the project's epochs)")
-    parser.add_argument('-n', '--n-sources', type=int, default=N_SOURCES, help='number of sources')
+                        help=f"number of epochs (target mode: at most the project's epochs) (default {N_IMAGES})")
+    parser.add_argument('-n', '--n-sources', type=int, default=N_SOURCES,
+                        help=f'number of sources (default {N_SOURCES})')
     parser.add_argument('-a', '--a-parameter', type=float, default=1.0,
                         help='flat and catalogue modes: injected A, the SNR term at SNR 1 (default 1.0)')
     parser.add_argument('--beta', type=float, default=1.0,
@@ -635,7 +637,8 @@ def parse_args():
     parser.add_argument('--same-beam', action='store_true', help='the same beam in every epoch')
     parser.add_argument('--disable-epoch-offsets', action='store_true', help='no epoch translations')
     parser.add_argument('-nf', '--n-bad-freq-epochs', type=int, default=0,
-                        help=f'extra epochs at {BAD_FREQ_FACTOR:g}x the frequency, to test frequency cuts')
+                        help=f'extra epochs at {BAD_FREQ_FACTOR:g}x the frequency, to test frequency cuts '
+                             '(default 0)')
     parser.add_argument('--cadence-days', type=float, default=CADENCE_DAYS,
                         help=f'days between epochs (default {CADENCE_DAYS:g})')
     parser.add_argument('--flux-sys', type=float, default=0.0,
