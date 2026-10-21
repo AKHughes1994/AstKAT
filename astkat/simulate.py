@@ -687,6 +687,10 @@ def main():
         run_target_simulation(arguments)
     else:
         run_simulation(arguments)
+        if arguments.mode == 'noise':
+            # Noise mode injects no outliers, but astkat init turns the outlier mixture on.
+            msg("Noise mode injects no outliers: after astkat init, set MCMC.enable_outlier_mixture: false "
+                "in astkat_files/astkat.yaml")
 
 
 if __name__ == '__main__':
