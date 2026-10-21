@@ -1279,12 +1279,11 @@ def simulation_noise_figure(check):
 
     First panel: the first epoch's noise autocorrelation coefficient rho on
     the sky (right ascension increasing to the left), with the 50% contours
-    of the measurement, the beam and the beam self-convolution (white noise
-    convolved with the full beam). Second and third: rho along that epoch's
-    beam major and minor axes against the same two expectations. Fourth: for
-    every epoch, the fitted noise correlation FWHM over the beam FWHM along
-    each axis, 1 when the noise autocorrelation is the beam and sqrt(2) for
-    the beam self-convolution. Written to plots/simulate_noise_correlation.
+    of the measurement and the beam. Second and third: rho along that epoch's
+    beam major and minor axes against the beam. Fourth: for every epoch, the
+    fitted noise correlation FWHM over the beam FWHM along each axis, 1 when
+    the noise autocorrelation is the beam. Written to
+    plots/simulate_noise_correlation.
 
     Parameters
     ----------
@@ -1303,8 +1302,6 @@ def simulation_noise_figure(check):
     image = ax.imshow(rho, origin='lower', extent=extent, cmap=COLOUR_MAP, vmin=min(0.0, rho.min()), vmax=1.0)
     ax.contour(d_ra, d_dec, rho, levels=[0.5], colors=DATA_COLOUR, linewidths=1.2)
     ax.contour(d_ra, d_dec, check['beam_rho'], levels=[0.5], colors=HIGHLIGHT_COLOUR, linewidths=1.2)
-    ax.contour(d_ra, d_dec, check['self_rho'], levels=[0.5], colors=MUTED_COLOUR, linewidths=1.2,
-               linestyles='--')
     cbar = fig.colorbar(image, ax=ax, fraction=0.046, pad=0.03)
     cbar.set_label(r'$\rho$', rotation=270, labelpad=14)
     cbar.ax.tick_params(which='both', direction='in')
@@ -1315,19 +1312,17 @@ def simulation_noise_figure(check):
         cut = check['cuts'][name]
         ax.axhline(0.0, color='0.4', lw=0.6, ls=':', zorder=0)
         ax.plot(cut['offset'], cut['beam'], '-', color=HIGHLIGHT_COLOUR, lw=1.3, zorder=2, label='Beam')
-        ax.plot(cut['offset'], cut['self'], '--', color=MUTED_COLOUR, lw=1.3, zorder=2,
-                label='Beam self-convolution')
         ax.plot(cut['offset'], cut['measured'], '.', ms=4, color=DATA_COLOUR, zorder=3, label='Simulated noise')
         ax.set_xlim(cut['offset'][0], cut['offset'][-1])
         ax.set_xlabel(f'Offset along beam {name} axis (arcsec)')
         ax.set_ylabel(r'$\rho$')
 
     ax = axes[3]
-    ax.axhline(1.0, color='0.4', lw=0.8, ls='--', zorder=0)
-    ax.axhline(np.sqrt(2.0), color='0.4', lw=0.8, ls=':', zorder=0)
+    ax.axhline(1.0, color=HIGHLIGHT_COLOUR, lw=1.0, ls='--', zorder=0)
     ax.plot(check['epochs'], check['ratio'][:, 0], '.', ms=4, color=DATA_COLOUR, zorder=2, label='Major axis')
     ax.plot(check['epochs'], check['ratio'][:, 1], '.', ms=4, color=MUTED_COLOUR, zorder=2, label='Minor axis')
-    ax.set_ylim(0.8, 1.55)
+    limit = 1.2 * np.max(np.abs(check['ratio'] - 1.0))
+    ax.set_ylim(1.0 - max(limit, 0.1), 1.0 + max(limit, 0.1))
     ax.set_xlabel('Epoch')
     ax.set_ylabel('Noise correlation FWHM / beam FWHM')
 

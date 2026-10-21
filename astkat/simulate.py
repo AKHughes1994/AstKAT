@@ -389,11 +389,10 @@ def noise_correlation_check(noise, beam, keep_maps=False):
         ratio : ndarray, shape (2,)
             fwhm_pixels over the beam FWHM, major and minor; 1 when the
             autocorrelation is the beam.
-        With keep_maps, also rho, beam_rho and self_rho (2 L + 1, 2 L + 1),
-        the measured map and the beam and beam self-convolution expectations;
-        d_ra and d_dec, each lag's offset in arcsec; cuts, for 'major' and
-        'minor' the offsets in arcsec and rho measured, for the beam and for
-        the self-convolution; pixel_scale.
+        With keep_maps, also rho and beam_rho (2 L + 1, 2 L + 1), the
+        measured map and the beam expectation; d_ra and d_dec, each lag's
+        offset in arcsec; cuts, for 'major' and 'minor' the offsets in arcsec
+        and rho measured and for the beam; pixel_scale.
     """
     size = min(NOISE_CHECK_SIZE, noise.shape[0])
     start = (noise.shape[0] - size) // 2
@@ -429,9 +428,9 @@ def noise_correlation_check(noise, beam, keep_maps=False):
             measured = map_coordinates(rho, [max_lag + steps * np.sin(angle), max_lag + steps * np.cos(angle)],
                                        order=1)
             cuts[name] = {'offset': steps * PIXEL_SCALE, 'measured': measured,
-                          'beam': np.exp(-0.5 * (steps / sigma) ** 2), 'self': np.exp(-0.25 * (steps / sigma) ** 2)}
-        result.update(rho=rho, beam_rho=gaussian_map(dx, dy, beam_cov), self_rho=gaussian_map(dx, dy, 2.0 * beam_cov),
-                      d_ra=-dx * PIXEL_SCALE, d_dec=dy * PIXEL_SCALE, cuts=cuts, pixel_scale=PIXEL_SCALE)
+                          'beam': np.exp(-0.5 * (steps / sigma) ** 2)}
+        result.update(rho=rho, beam_rho=gaussian_map(dx, dy, beam_cov), d_ra=-dx * PIXEL_SCALE,
+                      d_dec=dy * PIXEL_SCALE, cuts=cuts, pixel_scale=PIXEL_SCALE)
     return result
 
 
@@ -601,8 +600,7 @@ def run_simulation(args):
     if noise_checks:
         ratio = np.array([c['ratio'] for c in noise_checks])
         msg(f"Noise correlation / beam FWHM over {len(noise_checks)} epochs: major {np.median(ratio[:, 0]):.3f}, "
-            f"minor {np.median(ratio[:, 1]):.3f} (median; 1 for the beam, {np.sqrt(2.0):.3f} for the beam "
-            f"self-convolution)")
+            f"minor {np.median(ratio[:, 1]):.3f} (median; 1 for the beam)")
         simulation_noise_figure(dict(noise_checks[0], epochs=np.arange(len(noise_checks)), ratio=ratio))
     title(f"AstKAT simulation complete: {n_total} images in {output_dir}")
 
