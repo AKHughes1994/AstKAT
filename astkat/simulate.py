@@ -641,12 +641,12 @@ def parse_args():
                              '(default 0)')
     parser.add_argument('--cadence-days', type=float, default=CADENCE_DAYS,
                         help=f'days between epochs (default {CADENCE_DAYS:g})')
-    parser.add_argument('--flux-sys', type=float, default=0.0,
+    parser.add_argument('--flux-sys', type=float, default=0.05,
                         help='sigma of the per-epoch flux scale error g_e; each image is multiplied by 1 + g_e '
-                             '(default 0)')
-    parser.add_argument('--flux-frac', type=float, default=0.0,
+                             '(default 0.05)')
+    parser.add_argument('--flux-frac', type=float, default=0.02,
                         help="fractional error on each source's peak in each epoch, not shared between sources "
-                             '(default 0)')
+                             '(default 0.02)')
     seed = parser.add_mutually_exclusive_group()
     seed.add_argument('--seed', type=int, default=DEFAULT_SEED, help=f'random seed (default {DEFAULT_SEED})')
     seed.add_argument('-R', '--random-seed', action='store_true',
@@ -654,10 +654,10 @@ def parse_args():
     cat = parser.add_argument_group('flat and catalogue modes')
     cat.add_argument('-k', '--peak-noise', type=float, default=1.3,
                      help='noise on a peak over the rms (default 1.3, as PyBDSF measures)')
-    cat.add_argument('--outlier-fraction', type=float, default=0.0,
-                     help='fraction of positions drawn outlier-scale times wider (default 0)')
-    cat.add_argument('--outlier-scale', type=float, default=10.0,
-                     help='width of the outliers over the inlier width (default 10)')
+    cat.add_argument('--outlier-fraction', type=float, default=0.002,
+                     help='fraction of positions drawn outlier-scale times wider (default 0.002)')
+    cat.add_argument('--outlier-scale', type=float, default=6.0,
+                     help='width of the outliers over the inlier width (default 6)')
     target = parser.add_argument_group('target mode')
     target.add_argument('--start', default=None, help="starting position, e.g. '17:27:43.3 -16:12:04' "
                                                       "(default: the phase centre)")
