@@ -19,9 +19,21 @@ name (see COLUMN_ALIASES) or, without a header, taken in that order. RA and
 Dec are decimal degrees or sexagesimal, times ISO-8601 or MJD. Rows without
 a beam take the beam of their epoch.
 
+Radial offsets are measured from a reference: by default the first row's
+corrected position; with --reference-rows START END the mean of those rows'
+corrected positions (inclusive, 0-based); or with --reference a fixed
+position in decimal degrees, hmsdms or colon-separated hms dms, taken as
+exact. A reference built from rows carries its own
+uncertainty and its correlation with every row, through the full
+covariance, into each offset's error.
+
 Usage
     python target.py target.txt
     python target.py target.txt --beam-unit deg
+    python target.py target.txt --reference-rows 0 9
+    python target.py target.txt --reference 261.93046 -16.20533
+    python target.py target.txt --reference 17h27m43.31s -16d12m19.2s
+    python target.py target.txt --reference 17:27:43.31 -16:12:19.2
 """
 
 import argparse
@@ -235,27 +247,98 @@ def noise_covariance(snr, bmaj, bmin, bpa, opts, draws, rng=None):
     return cov / n_draws
 
 
-def radial_offsets(p, cov, reference=0):
+def reference_position(p, cov, weights=None, fixed=None):
     """
-    Distance of every row from the first row's corrected position, and its error from the full covariance.
+    The reference of the radial offsets: a weighted mean of rows, or a fixed position.
 
-    d_i = p_i - p_ref, so Cov(d_i) = C_ii + C_rr - C_ir - C_ri; the radial error
-    is that projected on the direction of d_i. Correlations through shared
-    or correlated epochs are therefore included.
+    For rows, ref = sum_j w_j p_j, so Cov(p_i, ref) = sum_j w_j C_ij and
+    Cov(ref) = sum_i w_i Cov(p_i, ref). A fixed position is exact.
+
+    Parameters
+    ----------
+    p : ndarray, shape (n, 2)
+    cov : ndarray, shape (n, 2, n, 2)
+    weights : ndarray, shape (n,), summing to 1, or None with fixed
+    fixed : ndarray, shape (2,), or None
+        Tangent-plane offsets of a fixed reference, arcsec.
+
+    Returns
+    -------
+    ref : ndarray, shape (2,)
+    ref_cov : ndarray, shape (2, 2)
+    cross : ndarray, shape (n, 2, 2), Cov(p_i, ref)
+    """
+    if fixed is not None:
+        return np.asarray(fixed, float), np.zeros((2, 2)), np.zeros((len(p), 2, 2))
+    cross = np.einsum('iajb,j->iab', cov, weights)
+    return weights @ p, np.einsum('i,iab->ab', weights, cross), cross
+
+
+def radial_offsets(p, cov, ref, ref_cov, cross):
+    """
+    Distance of every row from the reference, and its error from the full covariance.
+
+    d_i = p_i - ref, so Cov(d_i) = C_ii + Cov(ref) - Cov(p_i, ref) - Cov(ref, p_i);
+    the radial error is that projected on the direction of d_i. Correlations
+    through shared or correlated epochs, and the reference's own error, are
+    therefore included.
 
     Returns
     -------
     r, r_err : ndarray, shape (n,), arcsec
-        Zero for the reference row itself.
+        r_err is 0 for a row at the reference itself.
     """
-    d = p - p[reference]
+    d = p - ref
     r = np.hypot(d[:, 0], d[:, 1])
     g = np.divide(d, r[:, None], out=np.zeros_like(d), where=r[:, None] > 0)
-    n = len(p)
-    rows = np.arange(n)
-    cov_d = (cov[rows, :, rows, :] + cov[reference, :, reference, :][None]
-             - cov[rows, :, reference, :] - cov[reference, :, rows, :])
+    rows = np.arange(len(p))
+    cov_d = cov[rows, :, rows, :] + ref_cov[None] - cross - cross.transpose(0, 2, 1)
     return r, np.sqrt(np.einsum('ia,iab,ib->i', g, cov_d, g))
+
+
+def parse_reference(tokens):
+    """
+    RA and Dec in degrees from --reference: decimal degrees, hmsdms or colon-separated hms dms.
+
+    Two decimal numbers are degrees; anything else is read as RA in hours and
+    Dec in degrees, e.g. 17h27m43.31s -16d12m19.2s or 17:27:43.31 -16:12:19.2,
+    as one quoted argument or two.
+    """
+    text = " ".join(tokens).replace(",", " ")
+    parts = text.split()
+    try:
+        if len(parts) == 2:
+            return float(parts[0]), float(parts[1])
+    except ValueError:
+        pass
+    try:
+        coord = SkyCoord(text, unit=(u.hourangle, u.deg), frame='icrs')
+    except ValueError as e:
+        raise ValueError(f"--reference '{text}': not decimal degrees, hmsdms or colon-separated hms dms") from e
+    return float(coord.ra.deg), float(coord.dec.deg)
+
+
+def reference_spec(args, n, phase_centre):
+    """
+    The reference from the command line: weights over rows, or a fixed position, and a description for the log.
+
+    Returns
+    -------
+    weights : ndarray, shape (n,), or None
+    fixed : ndarray, shape (2,), arcsec offsets from the phase centre, or None
+    label : str
+    """
+    if args.reference is not None:
+        ra, dec = parse_reference(args.reference)
+        fixed = tangent_plane_arcsec(np.array([ra]), np.array([dec]), phase_centre)[0]
+        return None, fixed, f"fixed position ({ra:.7f}, {dec:+.7f}) deg, taken as exact"
+    start, end = args.reference_rows if args.reference_rows is not None else (0, 0)
+    if not 0 <= start <= end < n:
+        raise ValueError(f"--reference-rows {start} {end} outside rows 0 to {n - 1}, or START after END")
+    weights = np.zeros(n)
+    weights[start:end + 1] = 1.0 / (end - start + 1)
+    label = f"row {start}" if start == end else f"mean of rows {start} to {end} ({end - start + 1} rows)"
+    return weights, None, label
 
 
 def correct_target(x, epoch, noise_cov, trans):
@@ -291,7 +374,7 @@ def truth_file(args):
     return path if path.exists() else None
 
 
-def compare_with_truth(p, cov, path, phase_centre):
+def compare_with_truth(p, cov, path, phase_centre, weights, fixed):
     """
     Corrected positions against the true track a simulation injected.
 
@@ -301,8 +384,8 @@ def compare_with_truth(p, cov, path, phase_centre):
     Returns
     -------
     dict or None
-        true_xy (n, 2) arcsec; true_radial (n,), distance from the first
-        true position; diff (n, 2) corrected minus true, arcsec;
+        true_xy (n, 2) arcsec; true_radial (n,), distance from the same
+        reference built from the true positions (or the fixed position); diff (n, 2) corrected minus true, arcsec;
         chi = diff / sd per component; chi2 and dof from the full
         covariance; rms_mas, chi_mean, chi_std per axis; file. None if
         the rows do not match the catalogue.
@@ -319,7 +402,8 @@ def compare_with_truth(p, cov, path, phase_centre):
     chi = diff / sd
     d = diff.ravel()
     chi2 = float(d @ np.linalg.solve(cov.reshape(2 * n, 2 * n), d))
-    out = {'true_xy': true_xy, 'true_radial': np.hypot(*(true_xy - true_xy[0]).T),
+    true_ref = fixed if fixed is not None else weights @ true_xy
+    out = {'true_xy': true_xy, 'true_radial': np.hypot(*(true_xy - true_ref).T),
            'diff': diff, 'chi': chi, 'chi2': chi2, 'dof': 2 * n,
            'rms_mas': np.sqrt(np.mean(diff ** 2, axis=0)) * 1e3, 'chi_mean': chi.mean(axis=0),
            'chi_std': chi.std(axis=0), 'file': str(path)}
@@ -375,7 +459,7 @@ def write_results(stem, cat, ra, dec, epoch, trans, snr, bmaj, bmin, bpa, noise_
     Errors are along RA (RA cos Dec) and Dec, arcsec. *_meas is the
     measurement noise alone, *_corr the translation alone, and RA_err,
     Dec_err the total; RA_Dec_corr is the RA-Dec correlation of the total.
-    Radial_offset is the distance from the first row's corrected position,
+    Radial_offset is the distance from the reference (see reference_spec),
     with its error from the full covariance (see radial_offsets). With
     fitted flux scales, Flux_scale and Flux_scale_err are the epoch's g_e and
     Flux_corrected, Flux_corrected_err the flux density on the common scale
@@ -426,6 +510,7 @@ def write_summary(stem, target, aberrated, results_dir=RESULTS_DIR):
         f"{'Rows':<52}{n} in {len(np.unique(target['epoch']))} epochs "
         f"({int((~target['in_fit']).sum())} in epochs added after the fit)",
         f"{'Aberration correction':<52}{'applied' if aberrated else 'not applied'}",
+        f"{'Radial offset reference':<52}{target['reference']}",
         f"{'SNR':<52}{target['snr'].min():.1f} to {target['snr'].max():.1f}",
         f"{'Median error, measurement, RA and Dec':<52}{np.median(meas[:, 0]):.2f}, {np.median(meas[:, 1]):.2f} mas",
         f"{'Median error, translation, RA and Dec':<52}{np.median(corr[:, 0]):.2f}, {np.median(corr[:, 1]):.2f} mas",
@@ -476,6 +561,14 @@ def parse_args():
     parser.add_argument('--truth', type=Path, default=None,
                         help='true track of a simulated target (default: {stem}_truth.csv beside the catalogue, '
                              'if present)')
+    reference = parser.add_mutually_exclusive_group()
+    reference.add_argument('--reference', nargs='+', metavar='POSITION', default=None,
+                           help='fixed reference of the radial offsets, taken as exact: decimal degrees '
+                                '(261.93046 -16.20533), hmsdms (17h27m43.31s -16d12m19.2s) or colon-separated '
+                                'hms dms (17:27:43.31 -16:12:19.2), quoted or not')
+    reference.add_argument('--reference-rows', nargs=2, type=int, metavar=('START', 'END'), default=None,
+                           help='reference of the radial offsets the mean of these rows\' corrected positions, '
+                                'inclusive, 0-based (default: row 0)')
     return parser.parse_args()
 
 
@@ -516,17 +609,22 @@ def main():
 
     ra_corr, dec_corr = tangent_plane_to_radec(p, phase_centre)
     stem = args.catalog.stem
-    r, r_err = radial_offsets(p, cov)
+    weights, fixed, label = reference_spec(args, len(p), phase_centre)
+    ref, ref_cov, cross = reference_position(p, cov, weights, fixed)
+    ref_ra, ref_dec = tangent_plane_to_radec(ref[None], phase_centre)
+    msg(f"Radial offsets from the {label}: ({float(ref_ra[0]):.7f}, {float(ref_dec[0]):+.7f}) deg, error "
+        f"{np.sqrt(ref_cov[0, 0]) * 1e3:.2f} (RA), {np.sqrt(ref_cov[1, 1]) * 1e3:.2f} (Dec) mas")
+    r, r_err = radial_offsets(p, cov, ref, ref_cov, cross)
     write_results(stem, cat, ra_corr, dec_corr, epoch, trans, snr, bmaj, bmin, bpa, noise_cov, cov, r, r_err,
                   fluxes)
 
     # For a simulated target, the corrected track against the injected one.
     path = truth_file(args)
-    truth = compare_with_truth(p, cov, path, phase_centre) if path is not None else None
+    truth = compare_with_truth(p, cov, path, phase_centre, weights, fixed) if path is not None else None
 
     target = {'stem': stem, 'catalog': str(args.catalog), 'mjd': cat['time'].mjd, 'epoch': epoch,
               'in_fit': trans['in_fit'][epoch].astype(bool), 'snr': snr, 'measured': x, 'p': p, 'cov': cov,
-              'noise_cov': noise_cov, 'radial': r, 'radial_err': r_err, 'truth': truth}
+              'noise_cov': noise_cov, 'radial': r, 'radial_err': r_err, 'reference': label, 'truth': truth}
     write_summary(stem, target, aberrated)
     make_plots(target)
     return target
