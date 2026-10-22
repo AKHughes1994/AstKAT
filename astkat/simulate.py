@@ -909,7 +909,7 @@ def read_references(paths, region, max_lag_beams):
         if measured['n_excess']:
             msg(f"WARNING: {Path(path).name} has {measured['n_excess']} px beyond {SOURCE_LEVEL:g} sigma in the noise "
                 f"region centred on (x, y) = {measured['centre']} (largest {measured['peak']:.1f} sigma)")
-            msg("WARNING: they are masked with a margin of one BMAJ, but a source-free region is better")
+            msg("they are masked with a margin of one BMAJ, but a source-free region is better")
 
         references.append({'path': path, 'image_size': size, 'pixel_scale': pixel_scale,
                            'centre': (float(header['CRVAL1']), float(header['CRVAL2'])),
@@ -933,8 +933,9 @@ def read_references(paths, region, max_lag_beams):
     msg(f"Reference images: {len(references)} at {np.median([r['frequency_hz'] for r in references]) / 1e9:.3f} GHz "
         f"from {references[0]['date_obs']} to {references[-1]['date_obs']}, {first['image_size']} x "
         f"{first['image_size']} px of {first['pixel_scale']:.3f}\", phase centre RA {first['centre'][0]:.5f}, "
-        f"Dec {first['centre'][1]:.5f} deg; noise measured in a {region['size']} px box centred on "
-        f"{' '.join(region['text'].replace(',', ' ').split()[:2])} (x, y = {first['region_centre']} in the first image)")
+        f"Dec {first['centre'][1]:.5f} deg")
+    msg(f"Noise measured in a {region['size']} px box centred on {' '.join(region['text'].replace(',', ' ').split()[:2])} "
+        f"(x, y = {first['region_centre']} in the first image)")
     return references
 
 
