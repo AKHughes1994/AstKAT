@@ -231,7 +231,9 @@ def fit_model_figure(results, residual='chi'):
     positive = radial[radial > 0]
     ax.set_ylim(max(positive.min(), 0.1 * mid.min()), positive.max() * 1.2)
     ax.tick_params(labelbottom=False)
-    legend = ax.legend(loc='lower left')
+    # Opaque and on top, so the points beneath do not show through it.
+    legend = ax.legend(loc='lower left', frameon=True, facecolor='white', edgecolor='none', framealpha=1.0)
+    legend.set_zorder(10)
     # The offsets are drawn faint to show the density; their legend marker is drawn solid and larger.
     for handle, text in zip(legend.legend_handles, legend.get_texts()):
         if text.get_text() == r'Radial offset $r$':
@@ -253,7 +255,8 @@ def fit_model_figure(results, residual='chi'):
         # The inflated model sits eta times higher, so bins at or above this line lie within the inflated errors.
         ax_chi.axhline(covered, color=MODEL_COLOUR, ls='--', lw=1.3,
                        label=rf'Inflated error model ($\times{eta:.2f}$)')
-        ax_chi.legend(loc='best', fontsize='small')
+        ax_chi.legend(loc='best', fontsize='small', frameon=True, facecolor='white', edgecolor='none',
+                      framealpha=1.0).set_zorder(10)
         reach = np.append(reach, abs(covered))
     lim = max(limit, 1.2 * np.nanmax(reach))
     ax_chi.set_ylim(-lim, lim)
@@ -919,10 +922,12 @@ def epoch_histograms(offsets):
     histogram of the epoch's residuals from the fitted true positions
     (inliers in blue, outliers stacked in navy), the model's expected count
     in each bin (solid steps), and the epoch's translation (dash-dot) with
-    its 1-sigma band. Added epochs are named as such in the title. Written to
+    its 1-sigma band, with a simulation's injected translation (grey dashed).
+    Added epochs are named as such in the title. Written to
     plots/offsets_epoch_histograms/epoch_{n}.
     """
     trans, res = offsets['translations'], offsets['residuals']
+    truth = offsets['truth']['truth'] if offsets.get('truth') else None
     data, meta = offsets['data'], offsets['epochs']
     epoch = np.asarray(data['epoch'])
     inlier = np.asarray(trans['p_outlier']) < 0.5
@@ -943,6 +948,8 @@ def epoch_histograms(offsets):
             tau, sd = trans['median'][e, k] * 1e3, trans['sd'][e, k] * 1e3
             ax.axvspan(tau - sd, tau + sd, color='lightblue', alpha=0.5, lw=0, zorder=0)
             ax.axvline(tau, color=POSTERIOR_LINE_COLOUR, lw=1.0, ls='-.', label='Translation')
+            if truth is not None:
+                ax.axvline(truth[e, k] * 1e3, color=MUTED_COLOUR, lw=1.0, ls='--', label='Injected')
             ax.axvline(0, color='0.4', lw=0.8, ls='--', zorder=0)
             ax.set_xlim(edges[0], edges[-1])
             ax.set_xlabel(label)
@@ -962,8 +969,8 @@ def epoch_flux_histograms(offsets):
     A histogram of p / S_j - 1 in per cent for the epoch's peaks at or
     above the censoring threshold, the model's expected count in each bin
     (solid steps; each detection's normal truncated at the threshold, see
-    offsets.epoch_flux_residuals), and g_e (dash-dot) with its 1-sigma band.
-    The bins are shared across epochs. Written to
+    offsets.epoch_flux_residuals), and g_e (dash-dot) with its 1-sigma band,
+    with a simulation's injected g_e (grey dashed). The bins are shared across epochs. Written to
     plots/offsets_epoch_flux_histograms/epoch_{n}.
     """
     res = offsets['flux_residuals']
@@ -982,6 +989,8 @@ def epoch_flux_histograms(offsets):
         g, sd = res['scale'][e] * 100, res['scale_sd'][e] * 100
         ax.axvspan(g - sd, g + sd, color='lightblue', alpha=0.5, lw=0, zorder=0)
         ax.axvline(g, color=POSTERIOR_LINE_COLOUR, lw=1.0, ls='-.', label=r'Flux scale $g_e$')
+        if np.isfinite(res.get('truth', np.full(len(res['scale']), np.nan))[e]):
+            ax.axvline(res['truth'][e] * 100, color=MUTED_COLOUR, lw=1.0, ls='--', label='Injected')
         ax.axvline(0, color='0.4', lw=0.8, ls='--', zorder=0)
         ax.set_xlim(edges[0], edges[-1])
         ax.set_xlabel(r'Peak over fitted flux density $p / S_j - 1$ (%)')

@@ -368,8 +368,9 @@ def epoch_flux_residuals(results, data):
         residual (n_obs,); measured (n_obs,) bool, the peaks used; edges
         (N_BINS + 1,), symmetric about zero and shared by all epochs;
         expected (n_epochs, N_BINS), NaN for epochs without a fitted g_e;
-        scale, scale_sd (n_epochs,) of g_e. None without fitted flux
-        densities and flux scales.
+        scale, scale_sd (n_epochs,) of g_e; truth (n_epochs,), a simulation's
+        injected g_e in the fitted frame, NaN where there is none. None without
+        fitted flux densities and flux scales.
     """
     if results['source_flux'] is None or results['flux_scale'] is None:
         return None
@@ -380,6 +381,9 @@ def epoch_flux_residuals(results, data):
     scale = results['flux_scale']
     g, g_sd = np.full(data.n_epochs, np.nan), np.full(data.n_epochs, np.nan)
     g[scale['catalog_epochs']], g_sd[scale['catalog_epochs']] = scale['median'], scale['sd']
+    g_true = np.full(data.n_epochs, np.nan)
+    if 'truth' in scale:
+        g_true[scale['catalog_epochs']] = scale['truth']
 
     flux = results['source_flux']['median'][data.source]
     ge = g[data.epoch]
@@ -399,7 +403,7 @@ def epoch_flux_residuals(results, data):
     msg(f"Flux residuals: {int(measured.sum())} peaks at or above {threshold:g} rms in "
         f"{int(np.isfinite(g).sum())} fitted epochs; {int((~np.isfinite(g)).sum())} epochs outside the fit left out")
     return {'residual': residual, 'measured': measured, 'edges': edges, 'expected': expected,
-            'scale': g, 'scale_sd': g_sd}
+            'scale': g, 'scale_sd': g_sd, 'truth': g_true}
 
 
 # ============================================================================
