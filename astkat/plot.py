@@ -10,7 +10,7 @@ Used by
     fit.py        fit_diagnostics
     offsets.py    offsets_figures
     target.py     target_figure
-    simulate.py   simulation_noise_figure
+    simulate.py   simulation_noise_figure, reference_noise_epoch_figure, reference_noise_summary_figure
 """
 
 from pathlib import Path
@@ -1333,6 +1333,107 @@ def simulation_noise_figure(check):
                ncol=len(handles) + len(more_handles))
 
     save_figure(fig, 'simulate_noise_correlation')
+
+
+def reference_noise_epoch_figure(data):
+    """
+    One reference image's noise region and autocorrelation, against the synthesised noise and the beam.
+
+    First panel: the region in units of its robust sigma, clipped at
+    +/- 5, with the pixels masked as sources outlined in the highlight colour and
+    the beam in the lower-left corner, titled with the robust rms in
+    microJy per beam. Second: the reference image's
+    autocorrelation coefficient rho, with the 50% contours of the reference
+    (black), the synthesised noise (grey) and the beam (highlight colour). Third and
+    fourth: rho along the beam's major and minor axes, reference and
+    synthesised against the beam. Right ascension increases to the left.
+    Written as plots/simulate_reference_noise/{image}, in EPOCH_FORMATS.
+
+    Parameters
+    ----------
+    data : dict
+        From simulate.reference_noise_figure_data.
+    """
+    set_style()
+    fig, axes = plt.subplots(1, 4, figsize=(18.0, 4.4), gridspec_kw={'wspace': 0.45})
+
+    ax = axes[0]
+    image = ax.imshow(data['significance'], origin='lower', extent=data['region_extent'], cmap=COLOUR_MAP,
+                      vmin=-5.0, vmax=5.0, interpolation='nearest')
+    if data['masked'].any():
+        ax.contour(*np.meshgrid(data['region_ra'], data['region_dec']), data['masked'].astype(float),
+                   levels=[0.5], colors=HIGHLIGHT_COLOUR, linewidths=0.8)
+    left, right, bottom, top = data['region_extent']
+    bmaj, bmin, bpa = data['beam_arcsec']
+    ax.add_patch(Ellipse((left + 0.1 * (right - left), bottom + 0.1 * (top - bottom)), bmaj, bmin,
+                         angle=90.0 - bpa, facecolor='none', edgecolor=DATA_COLOUR, lw=1.0))
+    cbar = fig.colorbar(image, ax=ax, fraction=0.046, pad=0.03)
+    cbar.set_label(r'Pixel value / $\sigma$', rotation=270, labelpad=14)
+    cbar.ax.tick_params(which='both', direction='in')
+    ax.set_xlabel('Right ascension offset (arcsec)')
+    ax.set_ylabel('Declination offset (arcsec)')
+    ax.set_title(rf"rms $\sigma = {data['rms_ujy']:.1f}\,\mu$Jy beam$^{{-1}}$", fontsize=11)
+
+    ax = axes[1]
+    d_ra, d_dec, rho = data['d_ra'], data['d_dec'], data['rho']
+    image = ax.imshow(rho, origin='lower', extent=data['lag_extent'], cmap=COLOUR_MAP, vmin=min(0.0, rho.min()),
+                      vmax=1.0)
+    ax.contour(d_ra, d_dec, rho, levels=[0.5], colors=DATA_COLOUR, linewidths=1.2)
+    ax.contour(d_ra, d_dec, data['rho_synthesised'], levels=[0.5], colors=MUTED_COLOUR, linewidths=1.2)
+    ax.contour(d_ra, d_dec, data['beam_rho'], levels=[0.5], colors=HIGHLIGHT_COLOUR, linewidths=1.2)
+    cbar = fig.colorbar(image, ax=ax, fraction=0.046, pad=0.03)
+    cbar.set_label(r'$\rho$', rotation=270, labelpad=14)
+    cbar.ax.tick_params(which='both', direction='in')
+    ax.set_xlabel('Right ascension lag (arcsec)')
+    ax.set_ylabel('Declination lag (arcsec)')
+
+    for ax, name in zip(axes[2:], ('major', 'minor')):
+        cut = data['cuts'][name]
+        ax.axhline(0.0, color='0.4', lw=0.6, ls=':', zorder=0)
+        ax.plot(cut['offset'], cut['beam'], '-', color=HIGHLIGHT_COLOUR, lw=1.3, zorder=2, label='Beam')
+        ax.plot(cut['offset'], cut['synthesised'], '.', ms=4, color=MUTED_COLOUR, zorder=3,
+                label='Synthesised noise')
+        ax.plot(cut['offset'], cut['reference'], '.', ms=4, color=DATA_COLOUR, zorder=4, label='Reference image')
+        ax.set_xlim(cut['offset'][0], cut['offset'][-1])
+        ax.set_xlabel(f'Lag along beam {name} axis (arcsec)')
+        ax.set_ylabel(r'$\rho$')
+
+    # One legend above all panels, outside the plot areas.
+    handles, labels = axes[2].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='lower center', bbox_to_anchor=(0.5, 0.98), ncol=len(handles))
+
+    save_figure(fig, f"simulate_reference_noise/{data['name']}", formats=EPOCH_FORMATS, quiet=True)
+
+
+def reference_noise_summary_figure(summary):
+    """
+    Noise correlation FWHM ratios of every reference-mode epoch.
+
+    Top: the reference image's correlation FWHM over its beam FWHM, major
+    (black) and minor (grey) axis, 1 when the noise autocorrelation is the
+    beam. Bottom: the synthesised noise's correlation FWHM over the
+    reference image's, 1 when the synthesis reproduces it. Written to
+    plots/simulate_reference_noise.
+
+    Parameters
+    ----------
+    summary : dict
+        epochs (n,), to_beam (n, 2) and closure (n, 2), major then minor.
+    """
+    set_style()
+    fig, axes = plt.subplots(2, 1, figsize=(7.0, 4.6), sharex=True, gridspec_kw={'hspace': 0.0})
+    panels = ((summary['to_beam'], 'Reference / beam\nFWHM'), (summary['closure'], 'Synthesised /\nreference FWHM'))
+    for ax, (ratio, label) in zip(axes, panels):
+        ax.axhline(1.0, color='0.4', lw=0.8, ls='--', zorder=0)
+        ax.plot(summary['epochs'], ratio[:, 0], '.', ms=4, color=DATA_COLOUR, zorder=2, label='Major axis')
+        ax.plot(summary['epochs'], ratio[:, 1], '.', ms=4, color=MUTED_COLOUR, zorder=2, label='Minor axis')
+        spread = max(0.05, 1.2 * np.nanmax(np.abs(ratio - 1.0)))
+        ax.set_ylim(1.0 - spread, 1.0 + spread)
+        ax.set_ylabel(label)
+    axes[0].legend(loc='lower center', bbox_to_anchor=(0.5, 1.0), ncol=2)
+    axes[-1].set_xlabel('Epoch')
+
+    save_figure(fig, 'simulate_reference_noise')
 
 
 # ============================================================================

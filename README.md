@@ -120,12 +120,22 @@ flux rms ra dec bmaj bmin bpa time
 | `noise` (default) | Realistic images with beam-correlated noise. The position errors come from PyBDSF's own fitting. | The whole pipeline on realistic data |
 | `flat` | Noise-free images with every error injected directly: SNR term, floor, outliers and flux errors | Extraction, matching and the fit, against known values |
 | `catalogue` | The matched catalogue directly, skipping extraction and matching | The fit on its own |
+| `reference` | Like `noise`, but one epoch per real image you give it. Each epoch takes its image's pixel scale, phase centre, frequency, date and beam, plus noise with the rms and correlation measured in a source-free box of that image. | The whole pipeline on noise like your own data |
 | `target` | A moving target in an existing project's epochs, written for `astkat target`. Run it after `astkat offsets`, from the project directory. | Target correction |
 
 ```bash
 astkat simulate --mode flat -i 100 -o images   # 100 epochs into images/
+astkat simulate --mode reference --reference /path/to/images --reference-region "17:27:43.3 -16:12:04 400"
 astkat simulate -h                             # every option: injected errors, seeds, target motion, ...
 ```
+
+In `reference` mode:
+- `--reference` takes FITS files or folders (deep `*_stacked.fits` images are skipped). Only the most common frequency band is used.
+- `--reference-region` is required. It gives the box whose noise is measured in every image: a centre (RA Dec, colon-separated, or 0-based pixel x y) and a side length in pixels. Pick a box with no sources in it. Each side must be at least 4 × `--max-lag` beam widths.
+- The image size still comes from `-s`, so true pixel positions match the other modes.
+- `plots/simulate_reference_noise/` shows each image's noise box and its noise correlation, real against simulated. `plots/simulate_reference_noise` compares their widths for every epoch.
+
+`noise` and `reference` modes inject no outliers. After `astkat init`, set `MCMC.enable_outlier_mixture: false` in `astkat_files/astkat.yaml`.
 
 [`examples/run_simulation.sh`](examples/run_simulation.sh) runs the whole pipeline end to end and also recovers a simulated moving target. The settings at its top choose the mode and the injected errors. Run it from an empty directory:
 
