@@ -1142,9 +1142,13 @@ def run_simulation(args):
         'seed': args.seed, 'reference_images': [r['path'] for r in references] if reference else None,
         'reference_region': args.reference_region['text'] if reference else None,
         'noise_max_lag_bmaj': args.max_lag if args.mode in ('noise', 'reference') else None,
-        'a_parameter': A, 'beta': args.beta if flat else None, 'snr_break': args.snr_break if flat else None,
+        'a_parameter': A if flat else None, 'beta': args.beta if flat else None,
+        'snr_break': args.snr_break if flat else None,
         'snr_gamma': args.snr_gamma if flat else None,
-        'b_parameter': args.b_parameter, 'b_units': 'arcsec' if args.b_absolute else 'beam', 'alpha': 1.0,
+        'b_parameter': args.b_parameter, 'b_units': 'arcsec' if args.b_absolute else 'beam',
+        # Both error terms follow each beam axis only in flat and catalogue modes with fractional B; in noise and
+        # reference modes the SNR term comes from PyBDSF, and an absolute B is isotropic, so no alpha is injected.
+        'alpha': 1.0 if flat and not args.b_absolute else None,
         'epoch_offset_sigma_arcsec': 0.0 if args.disable_epoch_offsets else EPOCH_OFFSET_SIGMA,
         'field_rms': field_rms, 'rms_variation_frac': args.rms_variation if args.mode == 'noise' else None,
         'powerlaw_alpha': SNR_POWERLAW, 'min_snr': MIN_SNR, 'max_snr': MAX_SNR,

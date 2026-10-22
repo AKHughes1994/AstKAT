@@ -1924,7 +1924,8 @@ def simulation_truth(config, data, opts):
 
     Read from the simulator's truth files beside the images: A and the SNR
     shape (flat and catalogue modes, where they are injected), B (for a fit of
-    the injected kind, fractional or absolute), alpha, the peak noise k and the outlier fraction and
+    the injected kind, fractional or absolute), alpha (only where injected:
+    flat and catalogue modes with fractional B), the peak noise k and the outlier fraction and
     width (flat and catalogue modes), sigma_tau as the scatter of the injected epoch
     translations over the fitted epochs, f_sys as the scatter of the injected
     epoch flux scales (see injected_flux_scales), and f_frac.
@@ -1967,8 +1968,12 @@ def simulation_truth(config, data, opts):
     elif opts['fit_b']:
         msg(f"  Injected B is {'a fraction of the beam' if injected_fractional else 'in arcsec'}, the fit's "
             f"is {'fractional' if opts['b_fractional'] else 'absolute'}; no truth shown for B")
-    if opts['fit_alpha']:
+    if opts['fit_alpha'] and sim['alpha'] is not None:
         truth['alpha'] = float(sim['alpha'])
+    elif opts['fit_alpha']:
+        reason = ("the SNR-dependent error comes from PyBDSF" if sim['mode'] in ('noise', 'reference')
+                  else "the injected B is absolute, so isotropic, while the SNR term follows the beam")
+        msg(f"  No injected alpha in {sim['mode']} mode ({reason}); no truth shown for alpha")
     if sim['mode'] in ('flat', 'catalogue'):
         if opts['fit_flux']:
             truth['peak_noise'] = float(sim['peak_noise'])
