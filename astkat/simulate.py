@@ -908,8 +908,8 @@ def read_references(paths, region, max_lag_beams):
         fwhm, _ = fit_central_lobe(measured['rho'], beam)
         if measured['n_excess']:
             msg(f"WARNING: {Path(path).name} has {measured['n_excess']} px beyond {SOURCE_LEVEL:g} sigma in the noise "
-                f"region centred on (x, y) = {measured['centre']} (largest {measured['peak']:.1f} sigma); they are "
-                f"masked with a margin of one BMAJ, but a source-free region is better")
+                f"region centred on (x, y) = {measured['centre']} (largest {measured['peak']:.1f} sigma)")
+            msg("WARNING: they are masked with a margin of one BMAJ, but a source-free region is better")
 
         references.append({'path': path, 'image_size': size, 'pixel_scale': pixel_scale,
                            'centre': (float(header['CRVAL1']), float(header['CRVAL2'])),
