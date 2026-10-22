@@ -299,11 +299,16 @@ def two_pass_match(reference, epoch_files, phase_centre, match_threshold, min_ma
     moves = (f", shift median {np.median(shift[accepted]):.2f}\", largest {shift[accepted].max():.2f}\""
              if accepted.any() else "")
     s_code = column_index('s_code')
-    msg(f"Reference refinement: {tally['candidates']} of {len(moved)} references with >= {min_matches} S matches; "
-        f"{tally['loose']} too loose (scatter > {REFINE_TIGHTNESS:g}x expected), {tally['outside']} would leave the "
-        f"matching ellipse, {int(moved.sum())} moved; {int(worse.sum())} reverted as worse, {int((~keep).sum())} "
-        f"duplicates (< {REFINE_MERGE_BMIN:g} BMIN) dropped; {int(accepted.sum())} kept{moves}; matches "
-        f"{int(np.isfinite(first[:, :, RA]).sum())} -> {int(np.isfinite(final[:, :, RA]).sum())}, A epochs "
+    msg(f"Reference refinement: {tally['candidates']} of {len(moved)} references with >= {min_matches} S matches")
+    msg(f"{tally['loose']} too loose (scatter > {REFINE_TIGHTNESS:g}x expected), {tally['outside']} would leave the "
+        f"matching ellipse, {int(moved.sum())} moved")
+    msg(f"{int(worse.sum())} reverted as worse, {int((~keep).sum())} duplicates (< {REFINE_MERGE_BMIN:g} BMIN) "
+        f"dropped; {int(accepted.sum())} kept{moves}")
+    for j, n_before, n_after, a_before, a_after in zip(index, n1[worse], n2[worse], a1[worse], a2[worse]):
+        position = SkyCoord(reference['ra_deg'][j], reference['dec_deg'][j], unit='deg').to_string('hmsdms', precision=2)
+        msg(f"  reverted {position}: moved {shift[j]:.2f}\", matches {n_before} -> {n_after}, "
+            f"A epochs {a_before} -> {a_after}")
+    msg(f"Matches {int(np.isfinite(first[:, :, RA]).sum())} -> {int(np.isfinite(final[:, :, RA]).sum())}, A epochs "
         f"{int((first[:, :, s_code] == AMBIGUOUS).sum())} -> {int((final[:, :, s_code] == AMBIGUOUS).sum())}")
     original = np.column_stack([reference['ra_deg'], reference['dec_deg']])[keep]
     return final, np.column_stack([ra, dec])[keep], original
