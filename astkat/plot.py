@@ -1082,7 +1082,7 @@ def truth_sources_figure(offsets):
     """
     src = offsets['truth_sources']
     snr, diff, sd = src['injected_snr'], src['diff'] * 1e3, src['sd'] * 1e3
-    fig, axes = plt.subplots(2, 2, figsize=(7.5, 6.6), gridspec_kw={'hspace': 0.3, 'wspace': 0.3})
+    fig, axes = plt.subplots(2, 2, figsize=(8.0, 6.6), gridspec_kw={'hspace': 0.3, 'wspace': 0.45})
     ax_r, ax_h, ax_q, ax_f = axes.ravel()
     style = dict(fmt='.', ms=3, elinewidth=0.6, capsize=0)
 
