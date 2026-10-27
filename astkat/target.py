@@ -341,6 +341,155 @@ def reference_spec(args, n, phase_centre):
     return weights, None, label
 
 
+def format_position(ra_deg, dec_deg, sep='hms'):
+    """A position in sexagesimal (hmsdms, or colons with sep=':') and in decimal degrees."""
+    c = SkyCoord(ra_deg * u.deg, dec_deg * u.deg, frame='icrs')
+    dms = 'dms' if sep == 'hms' else sep
+    return (f"{c.ra.to_string(unit=u.hourangle, sep=sep, precision=5, pad=True)} "
+            f"{c.dec.to_string(unit=u.deg, sep=dms, precision=4, alwayssign=True, pad=True)}  "
+            f"({ra_deg:.7f}, {dec_deg:+.7f} deg)")
+
+
+def reference_jitter(ra_deg, dec_deg, weights):
+    """
+    Scatter of the reference rows about their mean, on the sphere, and the error it gives the reference.
+
+    The centre is the rows' weighted mean direction; each row's offset from
+    it along RA (RA cos Dec) and Dec comes from spherical_offsets_to. The
+    jitter is the weighted standard deviation of those offsets (the sample
+    one for equal weights) and the error on the reference
+    jitter * sqrt(sum w^2), jitter / sqrt(n) for equal weights. It holds
+    everything that varies between rows, real motion included, so it checks
+    the covariance rather than replacing it.
+
+    Returns
+    -------
+    dict or None
+        ra_deg, dec_deg of the centre; jitter, error (2,), RA and Dec,
+        arcsec; n. None for fewer than two rows.
+    """
+    rows = np.nonzero(weights)[0]
+    if len(rows) < 2:
+        return None
+    w = weights[rows] / weights[rows].sum()
+    coords = SkyCoord(ra_deg[rows] * u.deg, dec_deg[rows] * u.deg, frame='icrs')
+    xyz = coords.cartesian.xyz.value @ w
+    centre = SkyCoord(np.degrees(np.arctan2(xyz[1], xyz[0])) % 360.0 * u.deg,
+                      np.degrees(np.arcsin(xyz[2] / np.linalg.norm(xyz))) * u.deg, frame='icrs')
+    d_ra, d_dec = centre.spherical_offsets_to(coords)
+    d = np.column_stack([d_ra.to_value(u.arcsec), d_dec.to_value(u.arcsec)])
+    jitter = np.sqrt(w @ (d - w @ d) ** 2 / (1.0 - np.sum(w ** 2)))
+    return {'ra_deg': float(centre.ra.deg), 'dec_deg': float(centre.dec.deg), 'jitter': jitter,
+            'error': jitter * np.sqrt(np.sum(w ** 2)), 'n': len(rows)}
+
+
+def predicted_jitter(cov, weights):
+    """
+    Jitter of the reference rows expected from the full covariance, RA and Dec, arcsec.
+
+    The rows' residuals from their weighted mean are r = M p with
+    M = I - 1 w^T, so the expectation of the estimator in reference_jitter is
+    (sum_i w_i C_ii - w^T C w) / (1 - sum w^2) for each component, with C
+    that component's covariance between the rows.
+    """
+    rows = np.nonzero(weights)[0]
+    w = weights[rows] / weights[rows].sum()
+    c = cov[rows][:, :, rows, :]
+    var = [w @ np.diag(c[:, a, :, a]) - w @ c[:, a, :, a] @ w for a in (0, 1)]
+    return np.sqrt(np.maximum(var, 0.0) / (1.0 - np.sum(w ** 2)))
+
+
+def composite_reference_cov(ref_cov, weights, measured, predicted):
+    """
+    Reference covariance with the jitter the covariance does not explain added in quadrature.
+
+    The excess jitter sqrt(max(measured^2 - predicted^2, 0)) per component is
+    scatter beyond the noise model and translations (underestimated errors
+    or real motion over the rows); it adds (excess^2 sum w^2) to the
+    reference variance. What the covariance already holds is not counted
+    twice.
+
+    Returns
+    -------
+    cov : ndarray, shape (2, 2)
+    excess : ndarray, shape (2,), arcsec
+    """
+    excess = np.sqrt(np.maximum(measured ** 2 - predicted ** 2, 0.0))
+    return ref_cov + np.diag(excess ** 2 * np.sum(weights ** 2)), excess
+
+
+def reference_lines(ref):
+    """Readable lines on the reference: its position, error, and the jitter of its rows with and without translations."""
+    lines = [f"{'Reference':<40}{ref['label']}"]
+    for name, row in (('  start row', 'start'), ('  end row', 'end')):
+        if row in ref:
+            lines.append(f"{name:<40}{ref[row]['index']}: MJD {ref[row]['mjd']:.5f}, "
+                         f"DATE-OBS {ref[row]['date_obs']} (epoch {ref[row]['epoch']})")
+    if 'raw_ra_deg' in ref:
+        lines += [f"{'  without translations':<40}{format_position(ref['raw_ra_deg'], ref['raw_dec_deg'])}",
+                  f"{'  with translations':<40}{format_position(ref['ra_deg'], ref['dec_deg'])}",
+                  f"{'  shift from the translations':<40}{ref['shift'][0]:+.4f} (RA), {ref['shift'][1]:+.4f} (Dec) arcsec"]
+    else:
+        lines.append(f"{'  position':<40}{format_position(ref['ra_deg'], ref['dec_deg'])}")
+    if ref['fixed']:
+        lines.append(f"{'  error':<40}none, taken as exact")
+    else:
+        lines.append(f"{'  error from the full covariance':<40}{ref['error'][0]:.4f} (RA), "
+                     f"{ref['error'][1]:.4f} (Dec) arcsec")
+    before, after = ref.get('before'), ref.get('after')
+    if before and after:
+        ratio = before['jitter'] / after['jitter']
+        predicted, excess, composite = ref['predicted'], ref['excess'], ref['composite']
+        lines += [f"  Jitter of the {after['n']} reference rows, arcsec   jitter RA  jitter Dec   error RA  error Dec",
+                  f"    without translations {before['jitter'][0]:20.4f} {before['jitter'][1]:11.4f} "
+                  f"{before['error'][0]:10.4f} {before['error'][1]:10.4f}",
+                  f"    with translations {after['jitter'][0]:23.4f} {after['jitter'][1]:11.4f} "
+                  f"{after['error'][0]:10.4f} {after['error'][1]:10.4f}",
+                  f"    expected from the covariance {predicted[0]:12.4f} {predicted[1]:11.4f}",
+                  f"    excess over expected {excess[0]:20.4f} {excess[1]:11.4f}",
+                  f"    improvement, without / with {ratio[0]:12.2f}x {ratio[1]:10.2f}x",
+                  f"{'  composite error, covariance + excess':<40}{composite[0]:.4f} (RA), {composite[1]:.4f} (Dec) "
+                  f"arcsec, used for the radial offsets",
+                  "    excess jitter is scatter the covariance does not explain, real motion included"]
+    elif not ref['fixed']:
+        lines.append(f"{'  jitter':<40}not available from a single row")
+    return lines
+
+
+def error_decimals(err):
+    """Decimal places to quote an error to: one significant figure, two when it starts with 1."""
+    if not np.isfinite(err) or err <= 0:
+        return 4
+    exponent = int(np.floor(np.log10(err)))
+    leading = int(np.round(err / 10.0 ** exponent, 6))
+    return max(-exponent + (1 if leading == 1 else 0), 0)
+
+
+def publication_lines(ref):
+    """
+    The reference position to quote: RA hms and Dec dms, each +/- a conservative 1-sigma error.
+
+    The error is the larger of the composite error (covariance plus excess
+    jitter) and the error from the measured jitter alone, per component. The
+    RA error is given in seconds of time and in arcsec (RA cos Dec), the Dec
+    error in arcsec, and each coordinate to the decimal places of its error.
+    """
+    head = ["Reference position to quote (conservative 1 sigma)",
+            "--------------------------------------------------"]
+    c = SkyCoord(ref['ra_deg'] * u.deg, ref['dec_deg'] * u.deg, frame='icrs')
+    if ref['fixed']:
+        return head + [f"  {format_position(ref['ra_deg'], ref['dec_deg'])}, a fixed position, no error"]
+    err = ref.get('composite', ref['error'])
+    if ref.get('after') is not None:
+        err = np.maximum(err, ref['after']['error'])
+    ra_s = err[0] / (15.0 * np.cos(np.radians(ref['dec_deg'])))
+    n_ra, n_dec, n_ra_arcsec = error_decimals(ra_s), error_decimals(err[1]), error_decimals(err[0])
+    ra = c.ra.to_string(unit=u.hourangle, sep='hms', precision=n_ra, pad=True)
+    dec = c.dec.to_string(unit=u.deg, sep='dms', precision=n_dec, alwayssign=True, pad=True)
+    return head + [f"  RA   {ra} +/- {ra_s:.{n_ra}f} s ({err[0]:.{n_ra_arcsec}f} arcsec)",
+                   f"  Dec  {dec} +/- {err[1]:.{n_dec}f} arcsec"]
+
+
 def correct_target(x, epoch, noise_cov, trans):
     """
     Corrected positions and their full covariance.
@@ -496,35 +645,98 @@ def write_results(stem, cat, ra, dec, epoch, trans, snr, bmaj, bmin, bpa, noise_
     msg(f"Full covariance saved to {cov_path}")
 
 
-def write_summary(stem, target, aberrated, results_dir=RESULTS_DIR):
-    """Readable summary of the corrected target, and the truth comparison if any, to results/target_{stem}_summary.txt."""
+def row_lines(target):
+    """
+    One line per row, arcsec: corrected position, its total and measurement errors, the translation applied
+    and its error, and the radial offset from the reference with its error and significance.
+    """
     n = len(target['epoch'])
     diag = np.arange(n)
-    total = np.sqrt(target['cov'][diag, :, diag, :][:, [0, 1], [0, 1]]) * 1e3
-    meas = np.sqrt(target['noise_cov'][:, [0, 1], [0, 1]]) * 1e3
-    corr = np.sqrt(np.maximum(total ** 2 - meas ** 2, 0.0))
+    total = np.sqrt(target['cov'][diag, :, diag, :][:, [0, 1], [0, 1]])
+    meas = np.sqrt(target['noise_cov'][:, [0, 1], [0, 1]])
+    tau, tau_err = target['translation'], target['translation_err']
+    r, r_err = target['radial'], target['radial_err']
+    sig = np.divide(r, r_err, out=np.zeros_like(r), where=r_err > 0)
+    lines = [f"{'Row':>4} {'Ep':>3} {'MJD':>10} {'DATE-OBS':>23} {'SNR':>6}  {'RA':>14} {'Dec':>14}  {'err RA':>7} {'err Dec':>7}  "
+             f"{'meas RA':>7} {'meas Dec':>8}  {'tau RA':>8} {'tau Dec':>8} {'err RA':>7} {'err Dec':>7}  "
+             f"{'radial':>8} {'err':>7} {'sigma':>6}"]
+    for i in range(n):
+        c = SkyCoord(target['ra_deg'][i] * u.deg, target['dec_deg'][i] * u.deg, frame='icrs')
+        lines.append(f"{i:>4} {target['epoch'][i]:>3} {target['mjd'][i]:>10.4f} {target['date_obs'][i]:>23} "
+                     f"{target['snr'][i]:>6.1f}  "
+                     f"{c.ra.to_string(unit=u.hourangle, sep=':', precision=4, pad=True):>14} "
+                     f"{c.dec.to_string(unit=u.deg, sep=':', precision=3, alwayssign=True, pad=True):>14}  "
+                     f"{total[i, 0]:7.4f} {total[i, 1]:7.4f}  {meas[i, 0]:7.4f} {meas[i, 1]:8.4f}  "
+                     f"{tau[i, 0]:+8.4f} {tau[i, 1]:+8.4f} {tau_err[i, 0]:7.4f} {tau_err[i, 1]:7.4f}  "
+                     f"{r[i]:8.4f} {r_err[i]:7.4f} {sig[i]:6.1f}")
+    return lines
+
+
+def write_summary(stem, target, aberrated, results_dir=RESULTS_DIR):
+    """
+    Readable summary of the corrected target, and the truth comparison if any, to
+    results/target_{stem}_summary.txt, and to the log. Errors and offsets in arcsec.
+    """
+    n = len(target['epoch'])
+    diag = np.arange(n)
+    total = np.sqrt(target['cov'][diag, :, diag, :][:, [0, 1], [0, 1]])
+    meas = np.sqrt(target['noise_cov'][:, [0, 1], [0, 1]])
+    tau, tau_err = target['translation'], target['translation_err']
+    r, r_err = target['radial'], target['radial_err']
+    sig = np.divide(r, r_err, out=np.zeros_like(r), where=r_err > 0)
+    mjd = target['mjd']
+
+    def stats(name, values):
+        return (f"  {name:<30}{np.median(values[:, 0]):8.4f} {np.min(values[:, 0]):8.4f} {np.max(values[:, 0]):8.4f}"
+                f"   {np.median(values[:, 1]):8.4f} {np.min(values[:, 1]):8.4f} {np.max(values[:, 1]):8.4f}")
+
     lines = [
         "AstKAT target summary",
         "=====================",
-        f"{'Catalogue':<52}{target['catalog']}",
-        f"{'Rows':<52}{n} in {len(np.unique(target['epoch']))} epochs "
+        f"{'Catalogue':<40}{target['catalog']}",
+        f"{'Rows':<40}{n} in {len(np.unique(target['epoch']))} epochs "
         f"({int((~target['in_fit']).sum())} in epochs added after the fit)",
-        f"{'Aberration correction':<52}{'applied' if aberrated else 'not applied'}",
-        f"{'Radial offset reference':<52}{target['reference']}",
-        f"{'SNR':<52}{target['snr'].min():.1f} to {target['snr'].max():.1f}",
-        f"{'Median error, measurement, RA and Dec':<52}{np.median(meas[:, 0]):.2f}, {np.median(meas[:, 1]):.2f} mas",
-        f"{'Median error, translation, RA and Dec':<52}{np.median(corr[:, 0]):.2f}, {np.median(corr[:, 1]):.2f} mas",
-        f"{'Median error, total, RA and Dec':<52}{np.median(total[:, 0]):.2f}, {np.median(total[:, 1]):.2f} mas",
+        f"{'Time span':<40}MJD {mjd.min():.4f} to {mjd.max():.4f} ({mjd.max() - mjd.min():.2f} d)",
+        f"{'Aberration correction':<40}{'applied' if aberrated else 'not applied'}",
+        f"{'SNR':<40}{target['snr'].min():.1f} to {target['snr'].max():.1f} (median {np.median(target['snr']):.1f})",
+        "",
+        "Reference of the radial offsets",
+        "-------------------------------",
+        *reference_lines(target['reference']),
+        "",
+        "Errors and translations, arcsec",
+        "-------------------------------",
+        f"  {'':<30}{'RA: median':>8}{'min':>9}{'max':>9}   {'Dec: median':>8}{'min':>8}{'max':>9}",
+        stats('error, measurement', meas),
+        stats('error, translation', tau_err),
+        stats('error, total', total),
+        stats('translation applied', tau),
+        "",
+        "Radial offsets from the reference, arcsec",
+        "-----------------------------------------",
+        f"{'  Median, largest':<40}{np.median(r):.4f}, {r.max():.4f} (row {int(np.argmax(r))})",
+        f"{'  Median error':<40}{np.median(r_err[r_err > 0]) if np.any(r_err > 0) else 0.0:.4f}",
+        f"{'  Rows more than 3 sigma from it':<40}{int((sig > 3).sum())} of {n}",
+        f"{'  Largest significance':<40}{sig.max():.1f} sigma (row {int(np.argmax(sig))})",
+        "",
+        "Per row, arcsec (tau: translation subtracted; errors 1 sigma)",
+        "-------------------------------------------------------------",
+        *row_lines(target),
     ]
     truth = target.get('truth')
     if truth:
-        rms, mean, std = truth['rms_mas'], truth['chi_mean'], truth['chi_std']
+        rms, mean, std = truth['rms_mas'] / 1e3, truth['chi_mean'], truth['chi_std']
         lines += ["", "Comparison with simulation truth", "--------------------------------",
-                  f"{'Truth file':<52}{truth['file']}",
-                  f"{'rms, RA and Dec':<52}{rms[0]:.2f}, {rms[1]:.2f} mas",
-                  f"{'Chi mean +/- std, RA':<52}{mean[0]:+.2f} +/- {std[0]:.2f}",
-                  f"{'Chi mean +/- std, Dec':<52}{mean[1]:+.2f} +/- {std[1]:.2f}",
-                  f"{'chi2 / dof with the full covariance':<52}{truth['chi2']:.1f} / {truth['dof']}"]
+                  f"{'Truth file':<40}{truth['file']}",
+                  f"{'rms, RA and Dec':<40}{rms[0]:.4f}, {rms[1]:.4f} arcsec",
+                  f"{'Chi mean +/- std, RA':<40}{mean[0]:+.2f} +/- {std[0]:.2f}",
+                  f"{'Chi mean +/- std, Dec':<40}{mean[1]:+.2f} +/- {std[1]:.2f}",
+                  f"{'chi2 / dof with the full covariance':<40}{truth['chi2']:.1f} / {truth['dof']}"]
+    title("Target summary")
+    for line in lines[2:]:
+        msg(line)
+    # The position to quote is printed last, by main.
+    lines += ["", *publication_lines(target['reference'])]
     path = Path(results_dir) / f'target_{stem}_summary.txt'
     with open(path, 'w') as f:
         f.write("\n".join(lines) + "\n")
@@ -612,8 +824,26 @@ def main():
     weights, fixed, label = reference_spec(args, len(p), phase_centre)
     ref, ref_cov, cross = reference_position(p, cov, weights, fixed)
     ref_ra, ref_dec = tangent_plane_to_radec(ref[None], phase_centre)
-    msg(f"Radial offsets from the {label}: ({float(ref_ra[0]):.7f}, {float(ref_dec[0]):+.7f}) deg, error "
-        f"{np.sqrt(ref_cov[0, 0]) * 1e3:.2f} (RA), {np.sqrt(ref_cov[1, 1]) * 1e3:.2f} (Dec) mas")
+    reference = {'label': label, 'ra_deg': float(ref_ra[0]), 'dec_deg': float(ref_dec[0]),
+                 'error': np.sqrt(np.diag(ref_cov)), 'fixed': fixed is not None}
+    if weights is not None:
+        # The same rows without the translations, to show what the translations do to the reference.
+        rows = np.nonzero(weights)[0]
+        for key, i in (('start', rows[0]), ('end', rows[-1])):
+            reference[key] = {'index': int(i), 'mjd': float(cat['time'][i].mjd), 'epoch': int(epoch[i]),
+                              'date_obs': str(trans['obs_isot'][epoch[i]])}
+        raw = weights @ x
+        raw_ra, raw_dec = tangent_plane_to_radec(raw[None], phase_centre)
+        reference.update(raw_ra_deg=float(raw_ra[0]), raw_dec_deg=float(raw_dec[0]), shift=ref - raw,
+                         before=reference_jitter(ra, dec, weights),
+                         after=reference_jitter(ra_corr, dec_corr, weights))
+        if reference['after'] is not None:
+            # Composite reference error: the covariance plus the jitter it does not explain.
+            predicted = predicted_jitter(cov, weights)
+            ref_cov, excess = composite_reference_cov(ref_cov, weights, reference['after']['jitter'], predicted)
+            reference.update(predicted=predicted, excess=excess, composite=np.sqrt(np.diag(ref_cov)))
+    for line in reference_lines(reference):
+        msg(line)
     r, r_err = radial_offsets(p, cov, ref, ref_cov, cross)
     write_results(stem, cat, ra_corr, dec_corr, epoch, trans, snr, bmaj, bmin, bpa, noise_cov, cov, r, r_err,
                   fluxes)
@@ -624,9 +854,15 @@ def main():
 
     target = {'stem': stem, 'catalog': str(args.catalog), 'mjd': cat['time'].mjd, 'epoch': epoch,
               'in_fit': trans['in_fit'][epoch].astype(bool), 'snr': snr, 'measured': x, 'p': p, 'cov': cov,
-              'noise_cov': noise_cov, 'radial': r, 'radial_err': r_err, 'reference': label, 'truth': truth}
+              'noise_cov': noise_cov, 'radial': r, 'radial_err': r_err, 'reference': reference, 'truth': truth,
+              'ra_deg': ra_corr, 'dec_deg': dec_corr, 'date_obs': [str(trans['obs_isot'][e]) for e in epoch],
+              'translation': trans['median'][epoch],
+              'translation_err': np.sqrt(trans['covariance'][epoch, :, epoch, :][:, [0, 1], [0, 1]])}
     write_summary(stem, target, aberrated)
     make_plots(target)
+    msg("")
+    for line in publication_lines(reference):
+        msg(line)
     return target
 
 
