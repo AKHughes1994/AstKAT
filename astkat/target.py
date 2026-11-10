@@ -19,9 +19,23 @@ name (see COLUMN_ALIASES) or, without a header, taken in that order. RA and
 Dec are decimal degrees or sexagesimal, times ISO-8601 or MJD. Rows without
 a beam take the beam of their epoch.
 
+Optional columns sys_ra, sys_dec and sys_cov (arcsec, arcsec, arcsec^2) give a
+row its own systematic error, whatever its origin. It is added to that row's
+noise covariance, on top of the fitted noise model; NaN adds nothing, and
+sys_cov defaults to zero. --no-systematic ignores these columns, and with
+--floor-only rows with a systematic take only the floor B from the noise
+model, not its SNR term, for a systematic that already holds the thermal noise.
+
+With sys_ra_lo, sys_ra_hi, sys_dec_lo and sys_dec_hi as well (arcsec, towards
+lower and higher RA or Dec) the systematic is asymmetric. The covariance stays
+symmetric, using sys_ra and sys_dec or, without them, the mean of each pair,
+and the results gain lower and upper errors on RA, Dec and the radial offset,
+each side added in quadrature to the symmetric remainder.
+
 Radial offsets are measured from a reference: by default the first row's
 corrected position; with --reference-rows START END the mean of those rows'
-corrected positions (inclusive, 0-based); or with --reference a fixed
+corrected positions (inclusive, 0-based), leaving out any given with
+--reference-exclude; or with --reference a fixed
 position in decimal degrees, hmsdms or colon-separated hms dms, taken as
 exact. A reference built from rows carries its own
 uncertainty and its correlation with every row, through the full
@@ -31,6 +45,8 @@ Usage
     python target.py target.txt
     python target.py target.txt --beam-unit deg
     python target.py target.txt --reference-rows 0 9
+    python target.py target.txt --reference-rows 0 9 --reference-exclude 3 7
+    python target.py target.txt --reference-rows 0 40 --reference-exclude 3 12-15
     python target.py target.txt --reference 261.93046 -16.20533
     python target.py target.txt --reference 17h27m43.31s -16d12m19.2s
     python target.py target.txt --reference 17:27:43.31 -16:12:19.2
@@ -77,7 +93,27 @@ COLUMN_ALIASES = {
     'bmin': ('bmin', 'min', 'minor', 'dc_min'),
     'bpa': ('bpa', 'pa', 'position_angle', 'dc_pa'),
     'time': ('time', 'obs_time', 'date_obs', 'datetime', 'isot', 'mjd', 'obs_isot'),
+    'sys_ra': ('sys_ra', 'sys_ra_arcsec'),
+    'sys_dec': ('sys_dec', 'sys_dec_arcsec'),
+    'sys_cov': ('sys_cov', 'sys_cov_arcsec2'),
+    'sys_ra_lo': ('sys_ra_lo', 'sys_ra_lo_arcsec'),
+    'sys_ra_hi': ('sys_ra_hi', 'sys_ra_hi_arcsec'),
+    'sys_dec_lo': ('sys_dec_lo', 'sys_dec_lo_arcsec'),
+    'sys_dec_hi': ('sys_dec_hi', 'sys_dec_hi_arcsec'),
 }
+SYSTEMATIC_SIDE_FIELDS = ('sys_ra_lo', 'sys_ra_hi', 'sys_dec_lo', 'sys_dec_hi')
+CATALOGUE_HELP = """catalogue columns, found by header name in any order:
+  required      flux, rms, ra, dec, time
+  beam          bmaj, bmin, bpa (rows without a beam take their epoch's)
+  symmetric     sys_ra, sys_dec (arcsec), with sys_cov (arcsec^2) optional
+  asymmetric    sys_ra_lo, sys_ra_hi, sys_dec_lo, sys_dec_hi (arcsec), all four
+
+Without a header, columns are read by position as flux, rms, ra, dec, (bmaj, bmin, bpa,) time,
+and systematic columns are not available.
+
+A systematic adds to that row's noise model. Asymmetric sides add lower and upper errors on
+RA, Dec and the radial offset to the results; the covariance stays symmetric.
+"""
 BEAM_UNIT_TO_ARCSEC = {'arcsec': 1.0, 'arcmin': 60.0, 'deg': 3600.0}
 
 
@@ -112,7 +148,10 @@ def load_catalog(path, beam_unit='arcsec'):
     -------
     dict
         flux, rms, ra_deg, dec_deg (n,); time (Time); bmaj_arcsec,
-        bmin_arcsec, bpa_deg (n,), or None without beam columns.
+        bmin_arcsec, bpa_deg (n,), or None without beam columns;
+        systematic_cov (n, 2, 2), arcsec^2, or None without a systematic;
+        systematic_sides (n, 2, 2), arcsec, [row, RA or Dec, lower or upper],
+        or None without the _lo and _hi columns.
     """
     table = ascii_io.read(str(path))
     names = {c.lower(): c for c in table.colnames}
@@ -131,18 +170,32 @@ def load_catalog(path, beam_unit='arcsec'):
         mapping = dict(zip(CORE_FIELDS + ('time',), table.colnames))
     else:
         raise ValueError(f"{path}: need columns flux, rms, ra, dec (, bmaj, bmin, bpa), time; "
-                         f"found {table.colnames}")
+                         f"found {table.colnames}. Systematic columns need a header line")
 
     ra, dec = parse_positions(table[mapping['ra']], table[mapping['dec']])
     cat = {'flux': np.asarray(table[mapping['flux']], dtype=float),
            'rms': np.asarray(table[mapping['rms']], dtype=float),
            'ra_deg': ra, 'dec_deg': dec, 'time': parse_times(table[mapping['time']]),
-           'bmaj_arcsec': None, 'bmin_arcsec': None, 'bpa_deg': None}
+           'bmaj_arcsec': None, 'bmin_arcsec': None, 'bpa_deg': None, 'systematic_cov': None,
+           'systematic_sides': None}
     if 'bmaj' in mapping:
         scale = BEAM_UNIT_TO_ARCSEC[beam_unit]
         cat['bmaj_arcsec'] = np.asarray(table[mapping['bmaj']], dtype=float) * scale
         cat['bmin_arcsec'] = np.asarray(table[mapping['bmin']], dtype=float) * scale
         cat['bpa_deg'] = np.asarray(table[mapping['bpa']], dtype=float)
+    sides = [find(f) for f in SYSTEMATIC_SIDE_FIELDS]
+    if any(sides) and not all(sides):
+        raise ValueError(f"{path}: an asymmetric systematic needs all of {', '.join(SYSTEMATIC_SIDE_FIELDS)}")
+    if not headerless and all(sides):
+        cat['systematic_sides'] = np.nan_to_num(np.column_stack([np.asarray(table[c], dtype=float) for c in sides])).reshape(-1, 2, 2)
+    if not headerless and (cat['systematic_sides'] is not None or (find('sys_ra') and find('sys_dec'))):
+        if find('sys_ra') and find('sys_dec'):
+            sys_ra = np.nan_to_num(np.asarray(table[find('sys_ra')], dtype=float))
+            sys_dec = np.nan_to_num(np.asarray(table[find('sys_dec')], dtype=float))
+        else:
+            sys_ra, sys_dec = cat['systematic_sides'].mean(axis=2).T
+        sys_cov = np.nan_to_num(np.asarray(table[find('sys_cov')], dtype=float)) if find('sys_cov') else np.zeros(len(ra))
+        cat['systematic_cov'] = np.array([[[a ** 2, c], [c, b ** 2]] for a, b, c in zip(sys_ra, sys_dec, sys_cov)])
     msg(f"Loaded {path}: {len(ra)} measurements")
     return cat
 
@@ -205,7 +258,7 @@ def correct_aberration(cat, epoch, trans, config):
                                             times, observatory_location(config))
 
 
-def noise_covariance(snr, bmaj, bmin, bpa, opts, draws, rng=None):
+def noise_covariance(snr, bmaj, bmin, bpa, opts, draws, rng=None, floor_only=False):
     """
     Measurement noise covariance of each row in (RA, Dec), averaged over posterior draws, arcsec^2.
 
@@ -215,7 +268,8 @@ def noise_covariance(snr, bmaj, bmin, bpa, opts, draws, rng=None):
     and f_frac that draw's peak noise and fractional error; the average over
     draws then carries the SNR uncertainty, which matters near the threshold.
     Without rng (the SNR is the true one, as when simulating) or without a
-    flux density fit, the SNR is used as it is.
+    flux density fit, the SNR is used as it is. With floor_only the SNR term
+    is dropped and only the floor B remains.
 
     Returns
     -------
@@ -237,7 +291,9 @@ def noise_covariance(snr, bmaj, bmin, bpa, opts, draws, rng=None):
         p = {name: float(draws[name][k]) if name in draws else default
              for name, default in (('A', 0.0), ('beta', 1.0), ('snr_break', 1.0), ('snr_gamma', 0.0), ('B', 0.0),
                                    ('alpha', 1.0))}
-        if rng is not None and 'peak_noise' in draws:
+        if floor_only:
+            p['A'] = 0.0
+        elif rng is not None and 'peak_noise' in draws:
             ffrac = float(draws['flux_fractional'][k]) if 'flux_fractional' in draws else 0.0
             spread = np.hypot(float(draws['peak_noise'][k]), ffrac * snr)
             p['snr'] = truncnorm.rvs(-snr / spread, np.inf, loc=snr, scale=spread, random_state=rng)
@@ -296,6 +352,56 @@ def radial_offsets(p, cov, ref, ref_cov, cross):
     return r, np.sqrt(np.einsum('ia,iab,ib->i', g, cov_d, g))
 
 
+def asymmetric_errors(p, cov, ref, r_err, systematic_cov, sides):
+    """
+    Lower and upper errors with an asymmetric systematic, each side in quadrature with the symmetric remainder.
+
+    Each row's symmetric systematic in the total covariance is swapped for its
+    lower or upper side, keeping its RA-Dec correlation. For the radial offset
+    the upper error takes the side pointing away from the reference on each
+    axis, and the lower error the side pointing towards it. The reference
+    itself stays symmetric. An axis with no sides keeps its symmetric error.
+
+    Parameters
+    ----------
+    p : ndarray, shape (n, 2)
+    cov : ndarray, shape (n, 2, n, 2)
+    ref : ndarray, shape (2,)
+    r_err : ndarray, shape (n,)
+    systematic_cov : ndarray, shape (n, 2, 2)
+    sides : ndarray, shape (n, 2, 2)
+        [row, RA or Dec, lower or upper], arcsec.
+
+    Returns
+    -------
+    dict
+        position_lo, position_hi (n, 2) and radial_lo, radial_hi (n,), arcsec.
+    """
+    rows = np.arange(len(p))
+    total = cov[rows, :, rows, :][:, [0, 1], [0, 1]]
+    symmetric = np.sqrt(systematic_cov[:, [0, 1], [0, 1]])
+    sides = np.where(sides.sum(axis=2, keepdims=True) > 0, sides, symmetric[:, :, None])
+    correlation = np.divide(systematic_cov[:, 0, 1], symmetric[:, 0] * symmetric[:, 1],
+                            out=np.zeros(len(p)), where=symmetric[:, 0] * symmetric[:, 1] > 0)
+
+    def position_error(side):
+        return np.sqrt(np.maximum(total + sides[:, :, side] ** 2 - symmetric ** 2, 0.0))
+
+    d = p - ref
+    r = np.hypot(d[:, 0], d[:, 1])
+    g = np.divide(d, r[:, None], out=np.zeros_like(d), where=r[:, None] > 0)
+    away = (g >= 0).astype(int)
+
+    def radial_error(side_index):
+        side = np.take_along_axis(sides, side_index[:, :, None], axis=2)[:, :, 0]
+        change = (np.sum(g ** 2 * (side ** 2 - symmetric ** 2), axis=1)
+                  + 2.0 * g[:, 0] * g[:, 1] * (correlation * side[:, 0] * side[:, 1] - systematic_cov[:, 0, 1]))
+        return np.sqrt(np.maximum(r_err ** 2 + change, 0.0))
+
+    return {'position_lo': position_error(0), 'position_hi': position_error(1),
+            'radial_lo': radial_error(1 - away), 'radial_hi': radial_error(away)}
+
+
 def parse_reference(tokens):
     """
     RA and Dec in degrees from --reference: decimal degrees, hmsdms or colon-separated hms dms.
@@ -318,6 +424,32 @@ def parse_reference(tokens):
     return float(coord.ra.deg), float(coord.dec.deg)
 
 
+def parse_excluded_rows(tokens):
+    """
+    Row indices from --reference-exclude.
+
+    Parameters
+    ----------
+    tokens : list of str
+        Single rows, or inclusive ranges such as 12-15.
+
+    Returns
+    -------
+    list of int
+        Sorted and unique.
+    """
+    rows = set()
+    for token in tokens:
+        match = re.fullmatch(r'(\d+)(?:-(\d+))?', token)
+        if match is None:
+            raise ValueError(f"--reference-exclude '{token}': give a row or a range such as 12-15")
+        first, last = int(match[1]), int(match[2] or match[1])
+        if last < first:
+            raise ValueError(f"--reference-exclude '{token}': the range ends before it starts")
+        rows.update(range(first, last + 1))
+    return sorted(rows)
+
+
 def reference_spec(args, n, phase_centre):
     """
     The reference from the command line: weights over rows, or a fixed position, and a description for the log.
@@ -328,6 +460,8 @@ def reference_spec(args, n, phase_centre):
     fixed : ndarray, shape (2,), arcsec offsets from the phase centre, or None
     label : str
     """
+    if args.reference_exclude is not None and args.reference_rows is None:
+        raise ValueError("--reference-exclude needs --reference-rows")
     if args.reference is not None:
         ra, dec = parse_reference(args.reference)
         fixed = tangent_plane_arcsec(np.array([ra]), np.array([dec]), phase_centre)[0]
@@ -335,9 +469,20 @@ def reference_spec(args, n, phase_centre):
     start, end = args.reference_rows if args.reference_rows is not None else (0, 0)
     if not 0 <= start <= end < n:
         raise ValueError(f"--reference-rows {start} {end} outside rows 0 to {n - 1}, or START after END")
+    excluded = parse_excluded_rows(args.reference_exclude) if args.reference_exclude is not None else []
+    outside = [row for row in excluded if not start <= row <= end]
+    if outside:
+        raise ValueError(f"--reference-exclude rows {outside} are outside rows {start} to {end}")
+    rows = [row for row in range(start, end + 1) if row not in excluded]
+    if not rows:
+        raise ValueError(f"--reference-exclude leaves none of rows {start} to {end}")
     weights = np.zeros(n)
-    weights[start:end + 1] = 1.0 / (end - start + 1)
-    label = f"row {start}" if start == end else f"mean of rows {start} to {end} ({end - start + 1} rows)"
+    weights[rows] = 1.0 / len(rows)
+    label = f"row {start}" if start == end else f"mean of rows {start} to {end}"
+    if excluded:
+        label += f", excluding {', '.join(str(row) for row in excluded)}"
+    if len(rows) > 1:
+        label += f" ({len(rows)} rows)"
     return weights, None, label
 
 
@@ -601,7 +746,7 @@ def corrected_fluxes(cat, epoch, results):
 
 
 def write_results(stem, cat, ra, dec, epoch, trans, snr, bmaj, bmin, bpa, noise_cov, cov, r, r_err, fluxes,
-                  results_dir=RESULTS_DIR):
+                  asymmetric=None, results_dir=RESULTS_DIR):
     """
     Corrected positions to results/target_{stem}.csv and the full covariance to target_{stem}_covariance.npz.
 
@@ -612,7 +757,10 @@ def write_results(stem, cat, ra, dec, epoch, trans, snr, bmaj, bmin, bpa, noise_
     with its error from the full covariance (see radial_offsets). With
     fitted flux scales, Flux_scale and Flux_scale_err are the epoch's g_e and
     Flux_corrected, Flux_corrected_err the flux density on the common scale
-    (see corrected_fluxes).
+    (see corrected_fluxes). With an asymmetric systematic, RA_err_lo, RA_err_hi,
+    Dec_err_lo and Dec_err_hi are towards lower and higher RA or Dec and
+    Radial_offset_err_lo, Radial_offset_err_hi towards and away from the
+    reference (see asymmetric_errors).
     """
     n = len(epoch)
     diag = np.arange(n)
@@ -633,6 +781,11 @@ def write_results(stem, cat, ra, dec, epoch, trans, snr, bmaj, bmin, bpa, noise_
     if fluxes is not None:
         columns.update({'Flux_scale': fluxes['scale'], 'Flux_scale_err': fluxes['scale_err'],
                         'Flux_corrected': fluxes['flux'], 'Flux_corrected_err': fluxes['flux_err']})
+    if asymmetric is not None:
+        columns.update({'RA_err_lo_arcsec': asymmetric['position_lo'][:, 0], 'RA_err_hi_arcsec': asymmetric['position_hi'][:, 0],
+                        'Dec_err_lo_arcsec': asymmetric['position_lo'][:, 1], 'Dec_err_hi_arcsec': asymmetric['position_hi'][:, 1],
+                        'Radial_offset_err_lo_arcsec': asymmetric['radial_lo'],
+                        'Radial_offset_err_hi_arcsec': asymmetric['radial_hi']})
     path = Path(results_dir) / f'target_{stem}.csv'
     np.savetxt(path, np.column_stack(list(columns.values())), delimiter=',', comments='', fmt='%.10g',
                header=','.join(columns))
@@ -657,9 +810,11 @@ def row_lines(target):
     tau, tau_err = target['translation'], target['translation_err']
     r, r_err = target['radial'], target['radial_err']
     sig = np.divide(r, r_err, out=np.zeros_like(r), where=r_err > 0)
+    asymmetric = target['asymmetric']
     lines = [f"{'Row':>4} {'Ep':>3} {'MJD':>10} {'DATE-OBS':>23} {'SNR':>6}  {'RA':>14} {'Dec':>14}  {'err RA':>7} {'err Dec':>7}  "
              f"{'meas RA':>7} {'meas Dec':>8}  {'tau RA':>8} {'tau Dec':>8} {'err RA':>7} {'err Dec':>7}  "
-             f"{'radial':>8} {'err':>7} {'sigma':>6}"]
+             f"{'radial':>8} {'err':>7} {'sigma':>6}"
+             + (f"  {'RA lo':>7} {'RA hi':>7} {'Dec lo':>7} {'Dec hi':>7} {'rad lo':>7} {'rad hi':>7}" if asymmetric is not None else "")]
     for i in range(n):
         c = SkyCoord(target['ra_deg'][i] * u.deg, target['dec_deg'][i] * u.deg, frame='icrs')
         lines.append(f"{i:>4} {target['epoch'][i]:>3} {target['mjd'][i]:>10.4f} {target['date_obs'][i]:>23} "
@@ -668,7 +823,10 @@ def row_lines(target):
                      f"{c.dec.to_string(unit=u.deg, sep=':', precision=3, alwayssign=True, pad=True):>14}  "
                      f"{total[i, 0]:7.4f} {total[i, 1]:7.4f}  {meas[i, 0]:7.4f} {meas[i, 1]:8.4f}  "
                      f"{tau[i, 0]:+8.4f} {tau[i, 1]:+8.4f} {tau_err[i, 0]:7.4f} {tau_err[i, 1]:7.4f}  "
-                     f"{r[i]:8.4f} {r_err[i]:7.4f} {sig[i]:6.1f}")
+                     f"{r[i]:8.4f} {r_err[i]:7.4f} {sig[i]:6.1f}"
+                     + (f"  {asymmetric['position_lo'][i, 0]:7.4f} {asymmetric['position_hi'][i, 0]:7.4f} "
+                        f"{asymmetric['position_lo'][i, 1]:7.4f} {asymmetric['position_hi'][i, 1]:7.4f} "
+                        f"{asymmetric['radial_lo'][i]:7.4f} {asymmetric['radial_hi'][i]:7.4f}" if asymmetric is not None else ""))
     return lines
 
 
@@ -764,7 +922,8 @@ def make_plots(target):
 
 def parse_args():
     """Command-line options for target.py."""
-    parser = argparse.ArgumentParser(description="AstKAT target positions corrected with the epoch translations")
+    parser = argparse.ArgumentParser(description="AstKAT target positions corrected with the epoch translations",
+                                     formatter_class=argparse.RawDescriptionHelpFormatter, epilog=CATALOGUE_HELP)
     parser.add_argument('catalog', type=Path, help='target catalogue, one row per measurement')
     parser.add_argument('--beam-unit', choices=sorted(BEAM_UNIT_TO_ARCSEC), default='arcsec',
                         help='unit of bmaj and bmin in the catalogue (default: arcsec)')
@@ -773,6 +932,12 @@ def parse_args():
     parser.add_argument('--truth', type=Path, default=None,
                         help='true track of a simulated target (default: {stem}_truth.csv beside the catalogue, '
                              'if present)')
+    parser.add_argument('--reference-exclude', nargs='+', metavar='ROW', default=None,
+                        help='rows left out of --reference-rows: single rows or inclusive ranges such as 12-15')
+    parser.add_argument('--no-systematic', action='store_true',
+                        help='ignore the catalogue\'s systematic columns')
+    parser.add_argument('--floor-only', action='store_true',
+                        help='rows with a systematic take only the floor B from the noise model')
     reference = parser.add_mutually_exclusive_group()
     reference.add_argument('--reference', nargs='+', metavar='POSITION', default=None,
                            help='fixed reference of the radial offsets, taken as exact: decimal degrees '
@@ -816,6 +981,18 @@ def main():
         msg(f"Measurement errors averaged over each row's SNR uncertainty (peak noise k "
             f"{np.median(draws['peak_noise']):.3f}"
             + (f", f_frac {np.median(draws['flux_fractional']):.4f}" if 'flux_fractional' in draws else "") + ")")
+    if args.floor_only and (cat['systematic_cov'] is None or args.no_systematic):
+        raise ValueError("--floor-only needs systematic columns (sys_ra and sys_dec, or all four "
+                         "sys_*_lo/hi), and not --no-systematic")
+    if cat['systematic_cov'] is not None and not args.no_systematic:
+        if args.floor_only:
+            has_systematic = (cat['systematic_cov'][:, 0, 0] + cat['systematic_cov'][:, 1, 1]) > 0
+            floor_cov = noise_covariance(snr, bmaj, bmin, bpa, results['model'], draws, floor_only=True)
+            noise_cov = np.where(has_systematic[:, None, None], floor_cov, noise_cov)
+            msg(f"Floor only, without the SNR term, for the {has_systematic.sum()} rows with a systematic")
+        noise_cov = noise_cov + cat['systematic_cov']
+        msg(f"Systematic errors added to {np.count_nonzero(cat['systematic_cov'][:, 0, 0] + cat['systematic_cov'][:, 1, 1])} of "
+            f"{len(snr)} rows, on top of the noise model")
     fluxes = corrected_fluxes(cat, epoch, results)
     p, cov = correct_target(x, epoch, noise_cov, trans)
 
@@ -845,8 +1022,12 @@ def main():
     for line in reference_lines(reference):
         msg(line)
     r, r_err = radial_offsets(p, cov, ref, ref_cov, cross)
+    asymmetric = None
+    if cat['systematic_sides'] is not None and not args.no_systematic:
+        asymmetric = asymmetric_errors(p, cov, ref, r_err, cat['systematic_cov'], cat['systematic_sides'])
+        msg("Asymmetric errors added on RA, Dec and the radial offset")
     write_results(stem, cat, ra_corr, dec_corr, epoch, trans, snr, bmaj, bmin, bpa, noise_cov, cov, r, r_err,
-                  fluxes)
+                  fluxes, asymmetric)
 
     # For a simulated target, the corrected track against the injected one.
     path = truth_file(args)
@@ -854,7 +1035,7 @@ def main():
 
     target = {'stem': stem, 'catalog': str(args.catalog), 'mjd': cat['time'].mjd, 'epoch': epoch,
               'in_fit': trans['in_fit'][epoch].astype(bool), 'snr': snr, 'measured': x, 'p': p, 'cov': cov,
-              'noise_cov': noise_cov, 'radial': r, 'radial_err': r_err, 'reference': reference, 'truth': truth,
+              'noise_cov': noise_cov, 'radial': r, 'radial_err': r_err, 'asymmetric': asymmetric, 'reference': reference, 'truth': truth,
               'ra_deg': ra_corr, 'dec_deg': dec_corr, 'date_obs': [str(trans['obs_isot'][e]) for e in epoch],
               'translation': trans['median'][epoch],
               'translation_err': np.sqrt(trans['covariance'][epoch, :, epoch, :][:, [0, 1], [0, 1]])}

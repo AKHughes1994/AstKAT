@@ -28,7 +28,7 @@ Modes
             but with each image's pixel scale, phase centre, frequency, date
             and beam, at the size set by -s (so the true pixel positions
             match the other modes), and noise synthesised with the autocorrelation
-            and robust rms measured in a square region of it, which
+            and rms measured in a square region of it, which
             --reference-region must give and which should be free of
             sources; only the most common frequency band is used, and the
             images kept are listed
@@ -151,7 +151,6 @@ NOISE_CHECK_MAX_LAG = 6.0        # default largest lag measured (--max-lag), in 
 NOISE_CHECK_LOBE = 0.2           # the connected region above this rho around zero lag is fitted
 SOURCE_LEVEL = 5.0               # reference mode: pixels beyond this many robust sigma are masked as sources
 MAD_TO_SIGMA = 1.4826
-TAPER_START = 2.0 / 3.0          # reference mode: rho is tapered to zero from this fraction of the largest lag
 RANDOM_STREAMS = ('truth', 'beams', 'field_rms', 'epochs')   # independent random streams, one per purpose
 
 
@@ -532,52 +531,37 @@ def noise_correlation_check(noise, beam, pixel_scale, max_lag_beams, keep_maps=F
     return result
 
 
-def synthesise_noise(rho, image_size, sigma, rng):
+def synthesise_noise(residual, image_size, sigma, rng):
     """
-    Stationary Gaussian noise with a given autocorrelation, by filtering white noise in Fourier space.
+    Stationary Gaussian noise with a noise box's correlation, by filtering white noise with its power spectrum.
 
-    rho is tapered to zero over the outer part of its lag range (a radial
-    Tukey window flat out to TAPER_START of the largest lag), so its cut-off
-    does not ring in the power spectrum, and embedded in an image-sized array
-    with zero lag at the origin. Its Fourier transform is the power spectrum
-    P; the unbiased rho estimate need not be positive semi-definite, so
-    negative P is set to zero. White noise times sqrt(P) then has
-    autocorrelation rho, and is rescaled to sigma.
+    The spectrum is the squared Fourier transform of the box itself,
+    zero-padded to at least twice its side so it holds no wrap-around. It
+    cannot be negative, so it needs no clipping or taper, and the output has
+    the box's sample autocorrelation at every lag. The field is scaled by the
+    variance the filter implies, not by its own std, so the real rms scatter
+    of a small field is kept.
 
     Parameters
     ----------
-    rho : ndarray, shape (2 L + 1, 2 L + 1)
-        Correlation coefficient indexed [dy, dx], zero lag at the centre.
+    residual : ndarray, shape (n, n)
+        The box less its mean, zero at flagged pixels, from measure_region.
     image_size : int
-        Pixels per side of the output, at least 2 L + 1.
+        Pixels per side of the output.
     sigma : float
-        Output standard deviation.
+        Standard deviation of the noise process.
     rng : numpy.random.Generator
 
     Returns
     -------
-    noise : ndarray, shape (image_size, image_size)
-    clipped : float
-        Negative power set to zero, as a fraction of the total absolute power.
+    ndarray, shape (image_size, image_size)
     """
-    max_lag = rho.shape[0] // 2
-    shape = (image_size, image_size)
-    lags = np.arange(-max_lag, max_lag + 1)
-    dx, dy = np.meshgrid(lags, lags)
-    r = np.hypot(dx, dy) / max_lag
-    roll = np.clip((r - TAPER_START) / (1.0 - TAPER_START), 0.0, 1.0)
-    taper = np.where(r >= 1.0, 0.0, 0.5 * (1.0 + np.cos(np.pi * roll)))
-
-    # Negative lags wrap to the end of the array, so zero lag sits at [0, 0]
-    acf = np.zeros(shape)
-    acf[np.ix_(lags % image_size, lags % image_size)] = rho * taper
-    power = np.fft.rfft2(acf).real
-    negative = power < 0
-    clipped = float(-power[negative].sum() / np.abs(power).sum())
-    power[negative] = 0.0
-
+    side = max(2 * residual.shape[0], image_size)
+    shape = (side, side)
+    power = np.abs(np.fft.rfft2(residual, s=shape)) ** 2
+    variance = np.fft.irfft2(power, s=shape)[0, 0]   # Zero lag of the autocovariance this filter gives white noise
     noise = np.fft.irfft2(np.fft.rfft2(rng.standard_normal(shape)) * np.sqrt(power), s=shape)
-    return noise * sigma / noise.std(), clipped
+    return noise[:image_size, :image_size] * sigma / np.sqrt(variance)
 
 
 def reference_noise_check(noise, reference):
@@ -692,12 +676,12 @@ def reference_field(image, header, region, path):
 
 def measure_region(path, header, beam, region, max_lag_beams):
     """
-    Noise of a reference image's region: robust rms, source mask and autocorrelation.
+    Noise of a reference image's region: source mask, then the rms, autocorrelation and residual of the rest.
 
-    The robust rms is 1.4826 MAD of the region's finite pixels; pixels beyond
-    SOURCE_LEVEL times it are counted and masked as sources and the mask
-    grown by one BMAJ; the autocorrelation of the remaining pixels is
-    measured out to max_lag_beams BMAJ. The region must be at least four
+    The robust sigma is 1.4826 MAD of the region's finite pixels; pixels
+    beyond SOURCE_LEVEL times it are counted and masked as sources and the
+    mask grown by one BMAJ; the rms is that of the remaining pixels, whose
+    autocorrelation is measured out to max_lag_beams BMAJ. The region must be at least four
     times that lag per side, or an error gives the size needed.
 
     Parameters
@@ -718,9 +702,10 @@ def measure_region(path, header, beam, region, max_lag_beams):
     dict
         field (size, size), centre ((x, y), 0-based pixels), finite and
         used (bool (size, size), finite pixels and those left after masking),
-        median and sigma (image units), n_excess (pixels beyond SOURCE_LEVEL
-        sigma), peak (largest |pixel - median| / sigma) and rho
-        (2 L + 1, 2 L + 1).
+        median, sigma (robust) and rms (of the used pixels, image units),
+        n_excess (pixels beyond SOURCE_LEVEL sigma), peak (largest
+        |pixel - median| / sigma), rho (2 L + 1, 2 L + 1) and residual
+        (size, size, for synthesise_noise).
     """
     try:
         from .stacking import get_image
@@ -733,7 +718,7 @@ def measure_region(path, header, beam, region, max_lag_beams):
         raise ValueError(f"The reference region centred on (x, y) = {centre} of {path} is entirely blanked")
     median = np.median(field[finite])
     sigma = MAD_TO_SIGMA * np.median(np.abs(field[finite] - median))
-    # Sources masked, with a margin of one beam, so they do not enter the autocorrelation
+    # Sources masked, with a margin of one beam, so they enter neither the rms nor the autocorrelation
     radius = int(np.ceil(beam['bmaj_pixels']))
     disk = np.hypot(*np.mgrid[-radius:radius + 1, -radius:radius + 1]) <= radius
     excess = finite & (np.abs(field - median) > SOURCE_LEVEL * sigma)
@@ -745,9 +730,10 @@ def measure_region(path, header, beam, region, max_lag_beams):
                          f"{max_lag_beams:g} BMAJ ({max_lag} px) in {path}; use a box of at least "
                          f"{4 * max_lag} px or a smaller --max-lag")
     rho = noise_autocorrelation(np.where(finite, field, 0.0), max_lag, used)
+    residual = np.where(used, field - field[used].mean(), 0.0).astype(np.float32)
     return {'field': field, 'centre': centre, 'finite': finite, 'used': used, 'median': median,
-            'sigma': float(sigma), 'n_excess': int(excess.sum()),
-            'peak': float(np.max(np.abs(field[finite] - median)) / sigma), 'rho': rho}
+            'sigma': float(sigma), 'rms': float(np.std(field[used])), 'n_excess': int(excess.sum()),
+            'peak': float(np.max(np.abs(field[finite] - median)) / sigma), 'rho': rho, 'residual': residual}
 
 
 def reference_noise_figure_data(reference, check, region, pixel_scale, max_lag_beams):
@@ -776,8 +762,8 @@ def reference_noise_figure_data(reference, check, region, pixel_scale, max_lag_b
         masked (size, size) bool, pixels masked as sources; region_ra,
         region_dec (size,) pixel offsets from the region centre in arcsec and
         region_extent for imshow (right ascension increasing to the left);
-        beam_arcsec (BMAJ, BMIN, BPA); rms_ujy, the region's robust rms in
-        microJy per beam; rho, rho_synthesised and beam_rho
+        beam_arcsec (BMAJ, BMIN, BPA); rms_ujy, the rms of the region's
+        unmasked pixels in microJy per beam; rho, rho_synthesised and beam_rho
         (2 L + 1, 2 L + 1); d_ra, d_dec (2 L + 1, 2 L + 1) lag offsets in
         arcsec; lag_extent; cuts from beam_axis_cuts with 'reference' and
         'synthesised'; name, the image's file name.
@@ -802,7 +788,7 @@ def reference_noise_figure_data(reference, check, region, pixel_scale, max_lag_b
         'region_extent': [offsets[-1] + half, offsets[0] - half, offsets[0] - half, offsets[-1] + half],
         'beam_arcsec': (beam['bmaj_pixels'] * pixel_scale, beam['bmin_pixels'] * pixel_scale, beam['bpa_deg']),
         # Reference images are in Jy per beam
-        'rms_ujy': measured['sigma'] * 1e6,
+        'rms_ujy': measured['rms'] * 1e6,
         'rho': measured['rho'], 'rho_synthesised': check['rho'], 'beam_rho': gaussian_map(dx, dy, cov),
         'd_ra': -dx * pixel_scale, 'd_dec': dy * pixel_scale, 'lag_extent': [reach, -reach, -reach, reach],
         'cuts': beam_axis_cuts({'reference': measured['rho'], 'synthesised': check['rho']}, beam, pixel_scale),
@@ -877,9 +863,11 @@ def read_references(paths, region, max_lag_beams):
     list of dict
         path, image_size, pixel_scale (arcsec), centre (RA, Dec in deg),
         frequency_hz, date_obs (ISO), beam (from make_beam, in pixels),
-        region_centre ((x, y), 0-based pixels), sigma (robust rms, image
-        units), masked (fraction of the region masked), rho ((2 L + 1, 2 L + 1) correlation coefficient) and
-        correlation_fwhm_pixels ((2,) fitted FWHM, major and minor).
+        region_centre ((x, y), 0-based pixels), sigma (rms of the unmasked
+        pixels, image units), masked (fraction of the region masked), rho
+        ((2 L + 1, 2 L + 1) correlation coefficient), residual (for
+        synthesise_noise) and correlation_fwhm_pixels ((2,) fitted FWHM,
+        major and minor).
     """
     try:
         from .stacking import select_single_band
@@ -914,8 +902,9 @@ def read_references(paths, region, max_lag_beams):
         references.append({'path': path, 'image_size': size, 'pixel_scale': pixel_scale,
                            'centre': (float(header['CRVAL1']), float(header['CRVAL2'])),
                            'frequency_hz': float(header['CRVAL3']), 'date_obs': Time(header['DATE-OBS']).isot,
-                           'beam': beam, 'region_centre': measured['centre'], 'sigma': measured['sigma'],
+                           'beam': beam, 'region_centre': measured['centre'], 'sigma': measured['rms'],
                            'masked': float(1.0 - measured['used'].mean()), 'rho': measured['rho'],
+                           'residual': measured['residual'],
                            'correlation_fwhm_pixels': fwhm})
     references.sort(key=lambda r: Time(r['date_obs']).mjd)
 
@@ -989,7 +978,7 @@ def run_simulation(args):
     image_size = args.image_size
     pixel_scale = references[0]['pixel_scale'] if reference else PIXEL_SCALE
     if reference:
-        # The synthesis needs the full lag range, and its closure check four times it
+        # The closure check needs four times the lag range
         needed = max(4 * (r['rho'].shape[0] // 2) + 1 for r in references)
         if image_size < needed:
             raise ValueError(f"-s {image_size} is too small for the reference noise autocorrelation, measured out to "
@@ -1041,7 +1030,7 @@ def run_simulation(args):
     for e in range(n_total):
         beam = beams[e]
         ref = references[e] if reference else None
-        noise_check, clipped = None, None
+        noise_check = None
         if reference:
             frequency, date_obs = ref['frequency_hz'], ref['date_obs']
         else:
@@ -1078,7 +1067,7 @@ def run_simulation(args):
             image += rng.normal(FLAT_BACKGROUND, FLAT_BACKGROUND_SIGMA, image.shape)
         elif reference:
             # Noise with the reference image's autocorrelation and rms, checked against it before sources are added
-            noise, clipped = synthesise_noise(ref['rho'], image_size, rms, rng)
+            noise = synthesise_noise(ref['residual'], image_size, rms, rng)
             noise_check = reference_noise_check(noise, ref)
             image += noise
             reference_noise_epoch_figure(reference_noise_figure_data(ref, noise_check, args.reference_region,
@@ -1115,8 +1104,7 @@ def run_simulation(args):
                            'noise_correlation_pa_deg': float(noise_check['pa_deg'])} if noise_check else {}),
                        **({'reference_image': ref['path'], 'reference_region_centre_pixels': ref['region_centre'],
                            'reference_correlation_fwhm_pixels': [float(v) for v in ref['correlation_fwhm_pixels']],
-                           'reference_masked_fraction': ref['masked'],
-                           'power_spectrum_clipped_fraction': clipped} if reference else {})})
+                           'reference_masked_fraction': ref['masked']} if reference else {})})
         # One block per epoch, up to three lines and a blank line after: image, noise or peaks, source image
         msg(f"Epoch {e:04d}: beam {beam['bmaj_pixels']:.1f} x {beam['bmin_pixels']:.1f} px at "
             f"{beam['bpa_deg']:.0f} deg, translation ({east:+.3f}, {north:+.3f})\", flux scale {gain:.3f}"
@@ -1125,8 +1113,7 @@ def run_simulation(args):
         if noise_check:
             msg(f"    Noise correlation / {'reference' if reference else 'beam'} FWHM {noise_check['ratio'][0]:.2f} "
                 f"major, {noise_check['ratio'][1]:.2f} minor"
-                + (f"; {ref['masked'] * 100:.1f}% of the noise region masked as sources; {clipped * 100:.2f}% of "
-                   f"the power spectrum clipped" if reference else ""))
+                + (f"; {ref['masked'] * 100:.1f}% of the noise region masked as sources" if reference else ""))
         if flat:
             # The realised peak scatter in rms before the flux scale; k when f_frac = 0.
             msg(f"    Peak scatter {np.std(peak - fluxes) / field_rms:.3f} rms"

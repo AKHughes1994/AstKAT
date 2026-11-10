@@ -75,6 +75,24 @@ flux rms ra dec bmaj bmin bpa time
 
 - The header row is optional. Without one, the columns must come in the order above, with either all 8 or just `flux rms ra dec time`.
 - Common header names also work, such as `peak_flux`, `local_rms`, `maj`/`min`/`pa` or `mjd`.
+- *Optional* systematic columns add your own position error to a row; see [Systematic errors](#systematic-errors).
+
+### Systematic errors
+
+Give a row its own systematic position error, such as the scatter from a confusion Monte Carlo, and `astkat target` adds it to the fitted noise model. The columns are in arcsec (`sys_cov` in arcsec²). They need a header row, and `NaN` counts as zero.
+
+| Columns given | Option | Each row's measurement error |
+|---|---|---|
+| none | – | Fitted noise model: SNR term and floor B |
+| `sys_ra`, `sys_dec` (and optional `sys_cov`, default 0) | – | Noise model + systematic |
+| `sys_ra`, `sys_dec` | `--floor-only` | Floor B + systematic; rows without a systematic keep the full noise model |
+| `sys_ra_lo`, `sys_ra_hi`, `sys_dec_lo`, `sys_dec_hi` | – | Noise model + systematic, with the mean of each lo/hi pair in the covariance; also writes lower and upper errors |
+| all four sides and `sys_ra`, `sys_dec` | – | As above, but the covariance uses `sys_ra`, `sys_dec` |
+| any of the above | `--no-systematic` | Systematic columns ignored, same as none |
+
+- Use the default when the systematic holds only the extra error, for example confusion measured without thermal noise. Use `--floor-only` when it already holds the thermal noise, for example a Monte Carlo that injects sources into the real image. Otherwise the noise is counted twice.
+- `--floor-only` works with the asymmetric columns too. Without systematic columns, or together with `--no-systematic`, it is an error.
+- Asymmetric sides need all four columns. The covariance stays symmetric. The results gain `RA_err_lo/hi`, `Dec_err_lo/hi` (towards lower and higher RA or Dec) and `Radial_offset_err_lo/hi` (towards and away from the reference). Each side is added in quadrature to the rest of the error. The reference itself stays symmetric.
 
 ## Outputs
 
