@@ -20,7 +20,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
-from matplotlib.patches import Ellipse
+from matplotlib.patches import Circle, Ellipse
 from astropy.time import Time
 
 try:
@@ -41,6 +41,7 @@ HIGHLIGHT_COLOUR = 'C3'         # values flagged for attention
 AXIS_COLOURS = ('C3', 'C0')     # right ascension (red) and declination (blue) components
 AXIS_NAMES = ('RA', 'Dec')
 COLOUR_MAP = 'Blues'            # sequential colour map; light points get a black edge to stay visible
+CHI_2DOF_RADII = ((1.515, '-', '68%'), (2.486, '--', '95%'), (3.439, ':', '99.7%'))   # chi radius containing each fraction, 2 dof
 GROUP_COLOURS = {'S': DATA_COLOUR, 'C or M': HIGHLIGHT_COLOUR}   # PyBDSF S_Code groups
 
 
@@ -1276,6 +1277,100 @@ def target_figure(target):
     side[-1].set_xlabel('Observation epoch (MJD)')
 
     save_figure(fig, f"target_{target['stem']}")
+
+
+def _outline(ax, centre, cov, colour, ls, label):
+    """Unfilled 1-sigma ellipse of a 2x2 RA-Dec covariance at centre."""
+    values, vectors = np.linalg.eigh(cov)
+    angle = np.degrees(np.arctan2(vectors[1, 1], vectors[0, 1]))
+    ax.add_patch(Ellipse(centre, 2 * np.sqrt(values[1]), 2 * np.sqrt(values[0]), angle=angle, fill=False,
+                         edgecolor=colour, linestyle=ls, linewidth=1.4, zorder=4, label=label))
+
+
+def reference_figure(target):
+    """
+    The reference rows against a stationary source.
+
+    First panel: every row's corrected offset from the reference with 1-sigma
+    errors, the reference rows coloured by their chi2 about the reference (2
+    dof, from the full covariance) and the rows left out of it muted, with the
+    reference's 1-sigma ellipse from the covariance alone (solid) and with the
+    excess jitter (dashed). Axis limits follow the reference rows, so a few
+    poorly measured rows do not set the scale. Second: chi in RA against chi in
+    Dec for the reference rows, with the circles holding 68, 95 and 99.7% of a
+    2-dof chi. Third and fourth: chi in RA and Dec against time and against
+    measured SNR, with the +/- 1 band and +/- 3 lines. Chi is from the
+    covariance alone, so the excess jitter shows as scatter beyond the circles
+    and lines. Right ascension increases to the left. Written to
+    plots/target_{stem}_reference.
+    """
+    set_style()
+    ref, st = target['reference'], target['reference']['stationarity']
+    rows = st['rows']
+    n = len(target['p'])
+    diag = np.arange(n)
+    sd = np.sqrt(target['cov'][diag, :, diag, :][:, [0, 1], [0, 1]])
+    d = target['p'] - ref['xy']
+    others = np.setdiff1d(diag, rows)
+    chi, t, snr = st['chi'], target['mjd'][rows], target['snr'][rows]
+    cmap = plt.get_cmap(COLOUR_MAP)
+    norm = plt.Normalize(0.0, max(np.percentile(st['chi2_row'], 95), CHI_2DOF_RADII[-1][0] ** 2))
+
+    fig, axes = plt.subplots(1, 4, figsize=(18.0, 4.4), gridspec_kw={'width_ratios': [1.15, 1.0, 1.3, 1.3], 'wspace': 0.32})
+
+    ax = axes[0]
+    if len(others):
+        ax.errorbar(d[others, 0], d[others, 1], xerr=sd[others, 0], yerr=sd[others, 1], fmt='.', ms=3,
+                    color=MUTED_COLOUR, ecolor=MUTED_COLOUR, elinewidth=0.5, capsize=0, zorder=1,
+                    label='Rows left out of the reference')
+    ax.errorbar(d[rows, 0], d[rows, 1], xerr=sd[rows, 0], yerr=sd[rows, 1], fmt='none', ecolor=DATA_COLOUR,
+                elinewidth=0.5, capsize=0, zorder=2)
+    ax.scatter(d[rows, 0], d[rows, 1], c=st['chi2_row'], cmap=cmap, norm=norm, s=16, edgecolors=DATA_COLOUR,
+               linewidths=0.5, zorder=3, label='Reference rows')
+    _outline(ax, (0.0, 0.0), ref['cov_only'], MODEL_COLOUR, '-', r'Reference 1$\sigma$, covariance')
+    _outline(ax, (0.0, 0.0), ref['cov_composite'], MODEL_COLOUR, '--', r'Reference 1$\sigma$, covariance + excess')
+    span = max(1.3 * np.percentile(np.abs(d[rows]), 95), 4.0 * np.max(ref['composite']), 1e-3)
+    ax.set_xlim(span, -span)
+    ax.set_ylim(-span, span)
+    ax.set_aspect('equal')
+    ax.set_xlabel(r'Right ascension offset $\Delta\alpha\cos\delta$ (arcsec)')
+    ax.set_ylabel(r'Declination offset $\Delta\delta$ (arcsec)')
+    cbar = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax, fraction=0.046, pad=0.03, extend='max')
+    cbar.set_label(r'$\chi^2$ about the reference (2 dof)', rotation=270, labelpad=14)
+    cbar.ax.tick_params(which='both', direction='in')
+
+    limit = max(4.0, 1.1 * np.max(np.abs(chi)))
+    ax = axes[1]
+    ax.plot(chi[:, 0], chi[:, 1], '.', ms=4, color=DATA_COLOUR, zorder=3)
+    for radius, ls, fraction in CHI_2DOF_RADII:
+        ax.add_patch(Circle((0.0, 0.0), radius, fill=False, edgecolor=MODEL_COLOUR, linestyle=ls, linewidth=1.0,
+                            zorder=2, label=f'{fraction} of a 2-dof $\\chi$'))
+    ax.set_xlim(-limit, limit)
+    ax.set_ylim(-limit, limit)
+    ax.set_aspect('equal')
+    ax.set_xlabel(r'$\chi$, right ascension')
+    ax.set_ylabel(r'$\chi$, declination')
+
+    for ax, x, label, log in ((axes[2], t, 'Observation epoch (MJD)', False), (axes[3], snr, 'Measured SNR', True)):
+        ax.axhspan(-1, 1, color='0.9', lw=0, zorder=0)
+        for level in (-3, 3):
+            ax.axhline(level, color='0.4', lw=0.8, ls='--', zorder=1)
+        for k, (colour, name) in enumerate(zip(AXIS_COLOURS, AXIS_NAMES)):
+            ax.plot(x, chi[:, k], '.', ms=4, color=colour, zorder=2, label=rf'$\chi$, {name}')
+        ax.set_ylim(-limit, limit)
+        if log:
+            ax.set_xscale('log')
+        ax.set_xlabel(label)
+        ax.set_ylabel(r'$\chi$ about the reference')
+
+    handles, labels = [], []
+    for ax in axes[:3]:
+        for h, lab in zip(*ax.get_legend_handles_labels()):
+            if lab not in labels:
+                handles.append(h)
+                labels.append(lab)
+    fig.legend(handles, labels, loc='lower center', bbox_to_anchor=(0.5, 1.0), ncol=4, fontsize=9)
+    save_figure(fig, f"target_{target['stem']}_reference")
 
 
 # ============================================================================

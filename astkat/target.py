@@ -44,6 +44,13 @@ exact. A reference built from rows carries its own
 uncertainty and its correlation with every row, through the full
 covariance, into each offset's error.
 
+The reference rows are also tested against a stationary source: each row's
+chi about the reference, from the full covariance, gives chi2 / dof per
+component, and the excess jitter is the extra scatter per row that brings
+chi2 / dof to 1. That excess is added to the reference error used for the
+radial offsets, and plots/target_{stem}_reference shows the rows' offsets and
+chi against time and SNR.
+
 Usage
     python target.py target.txt
     python target.py target.txt --beam-unit deg
@@ -67,7 +74,8 @@ import astropy.units as u
 from astropy.coordinates import SkyCoord
 from astropy.io import ascii as ascii_io
 from astropy.time import Time
-from scipy.stats import truncnorm
+from scipy.optimize import brentq
+from scipy.stats import chi2 as chi2_distribution, truncnorm
 
 try:
     from .utils import (msg, title, parse_phase_center, observatory_location, correct_positions_for_aberration,
@@ -86,6 +94,7 @@ except ImportError:
 RESULTS_DIR = Path('results')
 MATCH_TOLERANCE_HOURS = 12.0     # largest gap between a row's time and its epoch's DATE-OBS
 SNR_DRAW_FLOOR = 1.0             # lowest true SNR drawn when averaging the noise model over a row's SNR uncertainty
+ROWS_PER_LOG_LINE = 10           # rows listed per log line when reference rows are left out
 
 CORE_FIELDS = ('flux', 'rms', 'ra', 'dec')
 BEAM_FIELDS = ('bmaj', 'bmin', 'bpa')
@@ -500,8 +509,9 @@ def reference_spec(args, snr, phase_centre):
     rows = [row for row in range(start, end + 1) if row not in excluded]
     low_snr = [row for row in rows if min_snr is not None and snr[row] < min_snr]
     if low_snr:
-        msg(f"--reference-min-snr {min_snr:g} leaves out {len(low_snr)} rows: "
-            + ", ".join(f"{row} (SNR {snr[row]:.1f})" for row in low_snr))
+        msg(f"--reference-min-snr {min_snr:g} leaves out {len(low_snr)} rows (row: SNR)")
+        for k in range(0, len(low_snr), ROWS_PER_LOG_LINE):
+            msg("  " + ", ".join(f"{row}: {snr[row]:.1f}" for row in low_snr[k:k + ROWS_PER_LOG_LINE]))
     rows = [row for row in rows if row not in low_snr]
     if not rows:
         rules = ((['--reference-exclude'] if excluded else [])
@@ -561,39 +571,52 @@ def reference_jitter(ra_deg, dec_deg, weights):
             'error': jitter * np.sqrt(np.sum(w ** 2)), 'n': len(rows)}
 
 
-def predicted_jitter(cov, weights):
+def stationarity(p, cov, weights, ref, ref_cov, cross):
     """
-    Jitter of the reference rows expected from the full covariance, RA and Dec, arcsec.
+    Test of the reference rows against a stationary source, and the excess jitter needed for one.
 
-    The rows' residuals from their weighted mean are r = M p with
-    M = I - 1 w^T, so the expectation of the estimator in reference_jitter is
-    (sum_i w_i C_ii - w^T C w) / (1 - sum w^2) for each component, with C
-    that component's covariance between the rows.
-    """
-    rows = np.nonzero(weights)[0]
-    w = weights[rows] / weights[rows].sum()
-    c = cov[rows][:, :, rows, :]
-    var = [w @ np.diag(c[:, a, :, a]) - w @ c[:, a, :, a] @ w for a in (0, 1)]
-    return np.sqrt(np.maximum(var, 0.0) / (1.0 - np.sum(w ** 2)))
-
-
-def composite_reference_cov(ref_cov, weights, measured, predicted):
-    """
-    Reference covariance with the jitter the covariance does not explain added in quadrature.
-
-    The excess jitter sqrt(max(measured^2 - predicted^2, 0)) per component is
-    scatter beyond the noise model and translations (underestimated errors
-    or real motion over the rows); it adds (excess^2 sum w^2) to the
-    reference variance. What the covariance already holds is not counted
-    twice.
+    Each reference row's chi about the reference is d_i / sqrt(Var(d_i)) per
+    component, with d_i = p_i - ref and
+    Var(d_i) = C_ii + Var(ref) - 2 Cov(p_i, ref) from the full covariance, since
+    every row is part of the mean. chi2 = sum chi_i^2 per component is tested
+    against N - 1 degrees of freedom. The excess jitter s is the extra scatter
+    that, added to every row (which adds s^2 (1 + sum w^2 - 2 w_i) to Var(d_i)),
+    brings chi2 / dof to 1; it is 0 when the rows are already consistent. It is
+    scatter the covariance does not explain, from real motion or from
+    underestimated errors.
 
     Returns
     -------
-    cov : ndarray, shape (2, 2)
-    excess : ndarray, shape (2,), arcsec
+    dict or None
+        rows (n_ref,), chi (n_ref, 2), chi2_row (n_ref,) from each row's 2 x 2
+        block, chi2, p_value, rms_chi and excess (2,) per component, dof, and
+        cov_composite (2, 2), the reference covariance with s^2 sum w^2 added.
+        None for fewer than two rows.
     """
-    excess = np.sqrt(np.maximum(measured ** 2 - predicted ** 2, 0.0))
-    return ref_cov + np.diag(excess ** 2 * np.sum(weights ** 2)), excess
+    rows = np.nonzero(weights)[0]
+    if len(rows) < 2:
+        return None
+    w = weights[rows]
+    d = p[rows] - ref
+    block = cov[rows, :, rows, :] + ref_cov[None] - cross[rows] - cross[rows].transpose(0, 2, 1)
+    var0 = block[:, [0, 1], [0, 1]]
+    grow = 1.0 + np.sum(w ** 2) - 2.0 * w
+    dof = len(rows) - 1
+
+    def chi2_at(s, a):
+        return float(np.sum(d[:, a] ** 2 / (var0[:, a] + s ** 2 * grow)))
+
+    chi2, excess = np.empty(2), np.zeros(2)
+    for a in (0, 1):
+        chi2[a] = chi2_at(0.0, a)
+        if chi2[a] > dof:
+            # chi2 falls monotonically with s; the upper bracket is the full scatter of the offsets
+            excess[a] = brentq(lambda s: chi2_at(s, a) - dof, 0.0, 10.0 * np.sqrt(np.mean(d[:, a] ** 2)) + 1e-6)
+    chi = d / np.sqrt(var0)
+    chi2_row = np.einsum('ia,iab,ib->i', d, np.linalg.inv(block), d)
+    return {'rows': rows, 'chi': chi, 'chi2_row': chi2_row, 'chi2': chi2, 'dof': dof,
+            'p_value': chi2_distribution.sf(chi2, dof), 'rms_chi': np.sqrt(chi2 / len(rows)),
+            'excess': excess, 'cov_composite': ref_cov + np.diag(excess ** 2 * np.sum(w ** 2))}
 
 
 def reference_lines(ref):
@@ -611,26 +634,30 @@ def reference_lines(ref):
         lines.append(f"{'  position':<40}{format_position(ref['ra_deg'], ref['dec_deg'])}")
     if ref['fixed']:
         lines.append(f"{'  error':<40}none, taken as exact")
-    else:
-        lines.append(f"{'  error from the full covariance':<40}{ref['error'][0]:.4f} (RA), "
-                     f"{ref['error'][1]:.4f} (Dec) arcsec")
+        return lines
+    lines.append(f"{'  error, covariance only':<40}{ref['error'][0]:.4f} (RA), {ref['error'][1]:.4f} (Dec) arcsec, "
+                 f"for a stationary source")
+    st = ref.get('stationarity')
+    if st is None:
+        lines.append(f"{'  stationarity':<40}not testable from a single row")
+        return lines
+    lines += [f"  Stationarity of the {len(st['rows'])} reference rows, chi about the reference from the full covariance",
+              f"    {'':<36}{'RA':>10}{'Dec':>10}",
+              f"    {'chi2 / dof':<36}{st['chi2'][0]:>6.1f}/{st['dof']:<3d}{st['chi2'][1]:>6.1f}/{st['dof']:<3d}",
+              f"    {'p-value':<36}{st['p_value'][0]:>10.2g}{st['p_value'][1]:>10.2g}",
+              f"    {'rms chi (1 if stationary)':<36}{st['rms_chi'][0]:>10.2f}{st['rms_chi'][1]:>10.2f}",
+              f"    {'excess jitter for chi2/dof = 1, arcsec':<36}{st['excess'][0]:>10.4f}{st['excess'][1]:>10.4f}",
+              f"{'  error, covariance + excess':<40}{ref['composite'][0]:.4f} (RA), {ref['composite'][1]:.4f} (Dec) "
+              f"arcsec, used for the radial offsets",
+              "    the excess jitter is scatter the covariance does not explain: real motion or underestimated errors"]
     before, after = ref.get('before'), ref.get('after')
     if before and after:
         ratio = before['jitter'] / after['jitter']
-        predicted, excess, composite = ref['predicted'], ref['excess'], ref['composite']
-        lines += [f"  Jitter of the {after['n']} reference rows, arcsec   jitter RA  jitter Dec   error RA  error Dec",
-                  f"    without translations {before['jitter'][0]:20.4f} {before['jitter'][1]:11.4f} "
-                  f"{before['error'][0]:10.4f} {before['error'][1]:10.4f}",
-                  f"    with translations {after['jitter'][0]:23.4f} {after['jitter'][1]:11.4f} "
-                  f"{after['error'][0]:10.4f} {after['error'][1]:10.4f}",
-                  f"    expected from the covariance {predicted[0]:12.4f} {predicted[1]:11.4f}",
-                  f"    excess over expected {excess[0]:20.4f} {excess[1]:11.4f}",
-                  f"    improvement, without / with {ratio[0]:12.2f}x {ratio[1]:10.2f}x",
-                  f"{'  composite error, covariance + excess':<40}{composite[0]:.4f} (RA), {composite[1]:.4f} (Dec) "
-                  f"arcsec, used for the radial offsets",
-                  "    excess jitter is scatter the covariance does not explain, real motion included"]
-    elif not ref['fixed']:
-        lines.append(f"{'  jitter':<40}not available from a single row")
+        lines += ["  Translation check, equal-weight scatter of the reference rows, arcsec",
+                  f"    {'':<36}{'RA':>10}{'Dec':>10}",
+                  f"    {'without translations':<36}{before['jitter'][0]:>10.4f}{before['jitter'][1]:>10.4f}",
+                  f"    {'with translations':<36}{after['jitter'][0]:>10.4f}{after['jitter'][1]:>10.4f}",
+                  f"    {'ratio, without / with':<36}{ratio[0]:>9.2f}x{ratio[1]:>9.2f}x"]
     return lines
 
 
@@ -947,6 +974,8 @@ def make_plots(target):
             msg("plot.py not found; figures skipped")
             return
     plotting.target_figure(target)
+    if target['reference'].get('stationarity') is not None:
+        plotting.reference_figure(target)
 
 
 # ============================================================================
@@ -1051,13 +1080,27 @@ def main():
         reference.update(raw_ra_deg=float(raw_ra[0]), raw_dec_deg=float(raw_dec[0]), shift=ref - raw,
                          before=reference_jitter(ra, dec, weights),
                          after=reference_jitter(ra_corr, dec_corr, weights))
-        if reference['after'] is not None:
-            # Composite reference error: the covariance plus the jitter it does not explain.
-            predicted = predicted_jitter(cov, weights)
-            ref_cov, excess = composite_reference_cov(ref_cov, weights, reference['after']['jitter'], predicted)
-            reference.update(predicted=predicted, excess=excess, composite=np.sqrt(np.diag(ref_cov)))
-    for line in reference_lines(reference):
-        msg(line)
+        # Stationarity of the reference rows; their excess jitter goes into the reference error.
+        st = stationarity(p, cov, weights, ref, ref_cov, cross)
+        if st is not None:
+            reference.update(stationarity=st, xy=ref, cov_only=ref_cov, cov_composite=st['cov_composite'],
+                             composite=np.sqrt(np.diag(st['cov_composite'])))
+            ref_cov = st['cov_composite']
+    # One line here; the full reference block is in the target summary.
+    if reference['fixed']:
+        ref_error = "taken as exact"
+    elif 'composite' in reference:
+        ref_error = (f"error {reference['composite'][0]:.4f} (RA), {reference['composite'][1]:.4f} (Dec) arcsec, "
+                     f"covariance + excess jitter")
+    else:
+        ref_error = f"error {reference['error'][0]:.4f} (RA), {reference['error'][1]:.4f} (Dec) arcsec"
+    msg(f"Reference: {label}, {ref_error}; details in the target summary")
+    if reference.get('stationarity') is not None:
+        st = reference['stationarity']
+        msg(f"Reference rows against a stationary source: chi2/dof RA {st['chi2'][0]:.1f}/{st['dof']} "
+            f"(p {st['p_value'][0]:.2g}), Dec {st['chi2'][1]:.1f}/{st['dof']} (p {st['p_value'][1]:.2g}); "
+            f"rms chi {st['rms_chi'][0]:.2f}, {st['rms_chi'][1]:.2f}; excess jitter {st['excess'][0]:.4f} (RA), "
+            f"{st['excess'][1]:.4f} (Dec) arcsec")
     r, r_err = radial_offsets(p, cov, ref, ref_cov, cross)
     asymmetric = None
     if cat['systematic_sides'] is not None and not args.no_systematic:
