@@ -10,8 +10,10 @@ epochs. Run after fit.py and offsets.py.
 A target's SNR comes from one measured peak, so the noise model is averaged
 over its uncertainty (peak noise k and fractional error f_frac from the
 fit) rather than evaluated at the measured value, which near the threshold
-is boosted by the detection itself. Flux densities are also put on the
-common flux scale of the fit, divided by 1 + g_e of their epoch.
+is boosted by the detection itself. Each draw of the true SNR is floored at
+SNR_DRAW_FLOOR, so the average stays finite for rows near the threshold.
+Flux densities are also put on the common flux scale of the fit, divided by
+1 + g_e of their epoch.
 
 Input is a text table, one row per measurement, with columns flux, rms, ra,
 dec, then optionally bmaj, bmin, bpa, then time. Columns are found by header
@@ -35,7 +37,8 @@ each side added in quadrature to the symmetric remainder.
 Radial offsets are measured from a reference: by default the first row's
 corrected position; with --reference-rows START END the mean of those rows'
 corrected positions (inclusive, 0-based), leaving out any given with
---reference-exclude; or with --reference a fixed
+--reference-exclude and, with --reference-min-snr, any whose measured SNR is
+below it; or with --reference a fixed
 position in decimal degrees, hmsdms or colon-separated hms dms, taken as
 exact. A reference built from rows carries its own
 uncertainty and its correlation with every row, through the full
@@ -47,6 +50,7 @@ Usage
     python target.py target.txt --reference-rows 0 9
     python target.py target.txt --reference-rows 0 9 --reference-exclude 3 7
     python target.py target.txt --reference-rows 0 40 --reference-exclude 3 12-15
+    python target.py target.txt --reference-rows 0 110 --reference-min-snr 5
     python target.py target.txt --reference 261.93046 -16.20533
     python target.py target.txt --reference 17h27m43.31s -16d12m19.2s
     python target.py target.txt --reference 17:27:43.31 -16:12:19.2
@@ -81,6 +85,7 @@ except ImportError:
 
 RESULTS_DIR = Path('results')
 MATCH_TOLERANCE_HOURS = 12.0     # largest gap between a row's time and its epoch's DATE-OBS
+SNR_DRAW_FLOOR = 1.0             # lowest true SNR drawn when averaging the noise model over a row's SNR uncertainty
 
 CORE_FIELDS = ('flux', 'rms', 'ra', 'dec')
 BEAM_FIELDS = ('bmaj', 'bmin', 'bpa')
@@ -264,9 +269,13 @@ def noise_covariance(snr, bmaj, bmin, bpa, opts, draws, rng=None, floor_only=Fal
 
     Uses the fit's inlier noise model with each row's own beam. The SNR is
     one measured peak over its rms, so in each draw every row's true SNR is
-    drawn from N(SNR, sqrt(k^2 + (f_frac SNR)^2)) truncated at zero, with k
-    and f_frac that draw's peak noise and fractional error; the average over
-    draws then carries the SNR uncertainty, which matters near the threshold.
+    drawn from N(SNR, sqrt(k^2 + (f_frac SNR)^2)) truncated below at
+    SNR_DRAW_FLOOR, with k and f_frac that draw's peak noise and fractional
+    error; the average over draws then carries the SNR uncertainty, which
+    matters near the threshold. Truncated at zero instead, the average of
+    sigma^2 ~ 1/SNR^2 would diverge and be set by the draw nearest zero. The
+    lower bound is capped at 5 spreads above the measured SNR, so a row
+    measured below the floor still has a non-empty range to draw from.
     Without rng (the SNR is the true one, as when simulating) or without a
     flux density fit, the SNR is used as it is. With floor_only the SNR term
     is dropped and only the floor B remains.
@@ -296,7 +305,8 @@ def noise_covariance(snr, bmaj, bmin, bpa, opts, draws, rng=None, floor_only=Fal
         elif rng is not None and 'peak_noise' in draws:
             ffrac = float(draws['flux_fractional'][k]) if 'flux_fractional' in draws else 0.0
             spread = np.hypot(float(draws['peak_noise'][k]), ffrac * snr)
-            p['snr'] = truncnorm.rvs(-snr / spread, np.inf, loc=snr, scale=spread, random_state=rng)
+            a = np.minimum((SNR_DRAW_FLOOR - snr) / spread, 5.0)
+            p['snr'] = truncnorm.rvs(a, np.inf, loc=snr, scale=spread, random_state=rng)
         v_min, v_maj = noise_variances(rows, p, opts)
         cov += (v_min[:, None, None] * u_min[:, :, None] * u_min[:, None, :]
                 + v_maj[:, None, None] * u_maj[:, :, None] * u_maj[:, None, :])
@@ -450,9 +460,18 @@ def parse_excluded_rows(tokens):
     return sorted(rows)
 
 
-def reference_spec(args, n, phase_centre):
+def reference_spec(args, snr, phase_centre):
     """
     The reference from the command line: weights over rows, or a fixed position, and a description for the log.
+
+    Rows inside --reference-rows are left out of the mean if given in
+    --reference-exclude or, with --reference-min-snr, if their own measured
+    SNR (flux / rms) is below it. They keep their radial offsets in the output.
+
+    Parameters
+    ----------
+    snr : ndarray, shape (n,)
+        Measured SNR of each row.
 
     Returns
     -------
@@ -460,8 +479,13 @@ def reference_spec(args, n, phase_centre):
     fixed : ndarray, shape (2,), arcsec offsets from the phase centre, or None
     label : str
     """
+    n = len(snr)
     if args.reference_exclude is not None and args.reference_rows is None:
         raise ValueError("--reference-exclude needs --reference-rows")
+    min_snr = args.reference_min_snr
+    if min_snr is not None and args.reference_rows is None:
+        msg("--reference-min-snr ignored: it applies only with --reference-rows")
+        min_snr = None
     if args.reference is not None:
         ra, dec = parse_reference(args.reference)
         fixed = tangent_plane_arcsec(np.array([ra]), np.array([dec]), phase_centre)[0]
@@ -474,13 +498,22 @@ def reference_spec(args, n, phase_centre):
     if outside:
         raise ValueError(f"--reference-exclude rows {outside} are outside rows {start} to {end}")
     rows = [row for row in range(start, end + 1) if row not in excluded]
+    low_snr = [row for row in rows if min_snr is not None and snr[row] < min_snr]
+    if low_snr:
+        msg(f"--reference-min-snr {min_snr:g} leaves out {len(low_snr)} rows: "
+            + ", ".join(f"{row} (SNR {snr[row]:.1f})" for row in low_snr))
+    rows = [row for row in rows if row not in low_snr]
     if not rows:
-        raise ValueError(f"--reference-exclude leaves none of rows {start} to {end}")
+        rules = ((['--reference-exclude'] if excluded else [])
+                 + ([f'--reference-min-snr {min_snr:g}'] if min_snr is not None else []))
+        raise ValueError(f"{' and '.join(rules)} {'leave' if len(rules) > 1 else 'leaves'} none of rows {start} to {end}")
     weights = np.zeros(n)
     weights[rows] = 1.0 / len(rows)
     label = f"row {start}" if start == end else f"mean of rows {start} to {end}"
     if excluded:
         label += f", excluding {', '.join(str(row) for row in excluded)}"
+    if min_snr is not None:
+        label += f", SNR >= {min_snr:g}"
     if len(rows) > 1:
         label += f" ({len(rows)} rows)"
     return weights, None, label
@@ -934,6 +967,9 @@ def parse_args():
                              'if present)')
     parser.add_argument('--reference-exclude', nargs='+', metavar='ROW', default=None,
                         help='rows left out of --reference-rows: single rows or inclusive ranges such as 12-15')
+    parser.add_argument('--reference-min-snr', type=float, metavar='SNR', default=None,
+                        help='rows inside --reference-rows whose measured SNR (flux / rms of the row) is below '
+                             'SNR are left out of the reference (default: no cut)')
     parser.add_argument('--no-systematic', action='store_true',
                         help='ignore the catalogue\'s systematic columns')
     parser.add_argument('--floor-only', action='store_true',
@@ -981,6 +1017,7 @@ def main():
         msg(f"Measurement errors averaged over each row's SNR uncertainty (peak noise k "
             f"{np.median(draws['peak_noise']):.3f}"
             + (f", f_frac {np.median(draws['flux_fractional']):.4f}" if 'flux_fractional' in draws else "") + ")")
+        msg(f"True SNR draws floored at {SNR_DRAW_FLOOR:g} (SNR_DRAW_FLOOR)")
     if args.floor_only and (cat['systematic_cov'] is None or args.no_systematic):
         raise ValueError("--floor-only needs systematic columns (sys_ra and sys_dec, or all four "
                          "sys_*_lo/hi), and not --no-systematic")
@@ -998,7 +1035,7 @@ def main():
 
     ra_corr, dec_corr = tangent_plane_to_radec(p, phase_centre)
     stem = args.catalog.stem
-    weights, fixed, label = reference_spec(args, len(p), phase_centre)
+    weights, fixed, label = reference_spec(args, snr, phase_centre)
     ref, ref_cov, cross = reference_position(p, cov, weights, fixed)
     ref_ra, ref_dec = tangent_plane_to_radec(ref[None], phase_centre)
     reference = {'label': label, 'ra_deg': float(ref_ra[0]), 'dec_deg': float(ref_dec[0]),
