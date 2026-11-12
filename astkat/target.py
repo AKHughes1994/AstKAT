@@ -35,7 +35,7 @@ and the results gain lower and upper errors on RA, Dec and the radial offset,
 each side added in quadrature to the symmetric remainder.
 
 Radial offsets are measured from a reference: by default the first row's
-corrected position; with --reference-rows START END the mean of those rows'
+corrected position; with --reference-rows START END a mean of those rows'
 corrected positions (inclusive, 0-based), leaving out any given with
 --reference-exclude and, with --reference-min-snr, any whose measured SNR is
 below it; or with --reference a fixed
@@ -44,8 +44,16 @@ exact. A reference built from rows carries its own
 uncertainty and its correlation with every row, through the full
 covariance, into each offset's error.
 
-The reference rows are also tested against a stationary source: each row's
-chi about the reference, from the full covariance, gives chi2 / dof per
+Two means of the reference rows are computed, an equal-weight mean and a
+weighted (generalised least-squares) mean with V = C + s^2 I, C the rows'
+full covariance and s the excess jitter, solved together with the weights.
+The excess caps every row's weight at 1 / s^2, so the brightest epochs lead
+the weighted mean without taking it over. --reference-weighting picks the one
+the radial offsets use (default weighted); both are given in the summary, and
+a large shift between them means bright and faint epochs disagree.
+
+For each mean the reference rows are tested against a stationary source: each
+row's chi about the reference, from the full covariance, gives chi2 / dof per
 component, and the excess jitter is the extra scatter per row that brings
 chi2 / dof to 1. That excess is added to the reference error used for the
 radial offsets, and plots/target_{stem}_reference shows the rows' offsets and
@@ -58,6 +66,7 @@ Usage
     python target.py target.txt --reference-rows 0 9 --reference-exclude 3 7
     python target.py target.txt --reference-rows 0 40 --reference-exclude 3 12-15
     python target.py target.txt --reference-rows 0 110 --reference-min-snr 5
+    python target.py target.txt --reference-rows 0 110 --reference-weighting equal
     python target.py target.txt --reference 261.93046 -16.20533
     python target.py target.txt --reference 17h27m43.31s -16d12m19.2s
     python target.py target.txt --reference 17:27:43.31 -16:12:19.2
@@ -74,6 +83,7 @@ import astropy.units as u
 from astropy.coordinates import SkyCoord
 from astropy.io import ascii as ascii_io
 from astropy.time import Time
+from scipy.linalg import cho_factor, cho_solve
 from scipy.optimize import brentq
 from scipy.stats import chi2 as chi2_distribution, truncnorm
 
@@ -95,6 +105,9 @@ RESULTS_DIR = Path('results')
 MATCH_TOLERANCE_HOURS = 12.0     # largest gap between a row's time and its epoch's DATE-OBS
 SNR_DRAW_FLOOR = 1.0             # lowest true SNR drawn when averaging the noise model over a row's SNR uncertainty
 ROWS_PER_LOG_LINE = 10           # rows listed per log line when reference rows are left out
+REFERENCE_WEIGHTINGS = ('weighted', 'equal')   # means of the reference rows; the first is the default
+WEIGHTED_MAX_ITERATIONS = 50     # alternations of weights and excess jitter for the weighted mean
+WEIGHTED_TOLERANCE_ARCSEC = 1e-5   # the weighted mean has converged when the excess jitter changes less than this
 
 CORE_FIELDS = ('flux', 'rms', 'ra', 'dec')
 BEAM_FIELDS = ('bmaj', 'bmin', 'bpa')
@@ -326,14 +339,16 @@ def reference_position(p, cov, weights=None, fixed=None):
     """
     The reference of the radial offsets: a weighted mean of rows, or a fixed position.
 
-    For rows, ref = sum_j w_j p_j, so Cov(p_i, ref) = sum_j w_j C_ij and
-    Cov(ref) = sum_i w_i Cov(p_i, ref). A fixed position is exact.
+    For rows, ref = sum_j W_j p_j with a 2 x 2 weight W_j per row
+    (sum_j W_j = I), so Cov(p_i, ref) = sum_j C_ij W_j^T and
+    Cov(ref) = sum_i W_i Cov(p_i, ref). Equal weights are W_j = I / N.
+    A fixed position is exact.
 
     Parameters
     ----------
     p : ndarray, shape (n, 2)
     cov : ndarray, shape (n, 2, n, 2)
-    weights : ndarray, shape (n,), summing to 1, or None with fixed
+    weights : ndarray, shape (n, 2, 2), zero for rows outside the reference, or None with fixed
     fixed : ndarray, shape (2,), or None
         Tangent-plane offsets of a fixed reference, arcsec.
 
@@ -345,8 +360,8 @@ def reference_position(p, cov, weights=None, fixed=None):
     """
     if fixed is not None:
         return np.asarray(fixed, float), np.zeros((2, 2)), np.zeros((len(p), 2, 2))
-    cross = np.einsum('iajb,j->iab', cov, weights)
-    return weights @ p, np.einsum('i,iab->ab', weights, cross), cross
+    cross = np.einsum('iajc,jbc->iab', cov, weights)
+    return np.einsum('iab,ib->a', weights, p), np.einsum('iac,icb->ab', weights, cross), cross
 
 
 def radial_offsets(p, cov, ref, ref_cov, cross):
@@ -571,52 +586,131 @@ def reference_jitter(ra_deg, dec_deg, weights):
             'error': jitter * np.sqrt(np.sum(w ** 2)), 'n': len(rows)}
 
 
-def stationarity(p, cov, weights, ref, ref_cov, cross):
-    """
-    Test of the reference rows against a stationary source, and the excess jitter needed for one.
+def equal_weights(rows, n):
+    """Equal 2 x 2 weights I / N on the given rows of n, zero elsewhere."""
+    w = np.zeros((n, 2, 2))
+    w[rows] = np.eye(2) / len(rows)
+    return w
 
-    Each reference row's chi about the reference is d_i / sqrt(Var(d_i)) per
-    component, with d_i = p_i - ref and
-    Var(d_i) = C_ii + Var(ref) - 2 Cov(p_i, ref) from the full covariance, since
-    every row is part of the mean. chi2 = sum chi_i^2 per component is tested
-    against N - 1 degrees of freedom. The excess jitter s is the extra scatter
-    that, added to every row (which adds s^2 (1 + sum w^2 - 2 w_i) to Var(d_i)),
-    brings chi2 / dof to 1; it is 0 when the rows are already consistent. It is
-    scatter the covariance does not explain, from real motion or from
-    underestimated errors.
+
+def gls_weights(cov, rows, excess):
+    """
+    Generalised least-squares weights of the given rows, with the excess jitter added to each.
+
+    With V = C + diag(s^2) over the rows (C their full covariance, s the
+    excess per component) and J the stacked 2 x 2 identities,
+    ref = (J^T V^-1 J)^-1 J^T V^-1 p, so the weights are
+    W = (J^T V^-1 J)^-1 J^T V^-1, one 2 x 2 block per row, summing to I.
+    """
+    n, m = cov.shape[0], len(rows)
+    V = cov[rows][:, :, rows, :].reshape(2 * m, 2 * m) + np.diag(np.tile(excess ** 2, m))
+    J = np.tile(np.eye(2), (m, 1))
+    factor = cho_factor(V)
+    VJ = cho_solve(factor, J)
+    blocks = np.linalg.solve(J.T @ VJ, VJ.T).reshape(2, m, 2).transpose(1, 0, 2)
+    w = np.zeros((n, 2, 2))
+    w[rows] = blocks
+    return w
+
+
+def with_excess(cov, rows, excess):
+    """The full covariance with the excess jitter s^2 added to each reference row's own variance."""
+    out = cov.copy()
+    for a in (0, 1):
+        out[rows, a, rows, a] += excess[a] ** 2
+    return out
+
+
+def reference_chi2(p, cov, weights, rows, excess):
+    """chi2 per component of the reference rows about the reference, with the excess jitter in the covariance."""
+    cov_s = with_excess(cov, rows, excess)
+    ref, ref_cov, cross = reference_position(p, cov_s, weights)
+    d = p[rows] - ref
+    block = cov_s[rows, :, rows, :] + ref_cov[None] - cross[rows] - cross[rows].transpose(0, 2, 1)
+    return np.sum(d ** 2 / block[:, [0, 1], [0, 1]], axis=0)
+
+
+def solve_excess(p, cov, weights, rows, start):
+    """
+    Excess jitter per component that brings chi2 / dof to 1 for fixed weights, 0 where already consistent.
+
+    Each component is solved with the other held at its current value;
+    chi2 falls monotonically as the excess grows.
+    """
+    dof = len(rows) - 1
+    excess = np.array(start, float)
+    for a in (0, 1):
+        def f(s):
+            trial = excess.copy()
+            trial[a] = s
+            return reference_chi2(p, cov, weights, rows, trial)[a] - dof
+        if f(0.0) <= 0:
+            excess[a] = 0.0
+            continue
+        upper = 10.0 * np.std(p[rows, a]) + 1e-6
+        while f(upper) > 0:
+            upper *= 10.0
+        excess[a] = brentq(f, 0.0, upper)
+    return excess
+
+
+def reference_mean(p, cov, rows, weighting):
+    """
+    One mean of the reference rows, its errors and its test against a stationary source.
+
+    Equal weighting has fixed weights I / N, and the excess jitter is solved
+    once. Weighted alternates generalised least-squares weights with the
+    excess jitter until the excess changes by less than
+    WEIGHTED_TOLERANCE_ARCSEC, so the weights and excess agree. In both,
+    each row's chi about the reference is d_i / sqrt(Var(d_i)) per
+    component from the covariance alone, with
+    Var(d_i) = C_ii + Var(ref) - 2 Cov(p_i, ref) since every row is part of
+    the mean, and chi2 = sum chi_i^2 is tested against N - 1 degrees of
+    freedom. The excess jitter s brings chi2 / dof to 1 once s^2 is added to
+    every reference row; it is scatter the covariance does not explain, from
+    real motion or underestimated errors.
 
     Returns
     -------
-    dict or None
-        rows (n_ref,), chi (n_ref, 2), chi2_row (n_ref,) from each row's 2 x 2
-        block, chi2, p_value, rms_chi and excess (2,) per component, dof, and
-        cov_composite (2, 2), the reference covariance with s^2 sum w^2 added.
-        None for fewer than two rows.
+    dict
+        weighting; weights (n, 2, 2); ref (2,); ref_cov (2, 2), covariance
+        only; cross (n, 2, 2); rows; chi (n_ref, 2) and chi2_row (n_ref,),
+        both from the covariance only; chi2, p_value, rms_chi, excess (2,);
+        dof; cov_composite (2, 2), the reference covariance with the excess;
+        n_eff (2,), 1 / sum of the squared diagonal weights per component,
+        and max_weight (2,); iterations.
     """
-    rows = np.nonzero(weights)[0]
-    if len(rows) < 2:
-        return None
-    w = weights[rows]
+    n = len(p)
+    excess, iterations = np.zeros(2), 1
+    if weighting == 'equal':
+        weights = equal_weights(rows, n)
+        excess = solve_excess(p, cov, weights, rows, excess)
+    else:
+        for iterations in range(1, WEIGHTED_MAX_ITERATIONS + 1):
+            weights = gls_weights(cov, rows, excess)
+            new = solve_excess(p, cov, weights, rows, excess)
+            converged = np.max(np.abs(new - excess)) < WEIGHTED_TOLERANCE_ARCSEC
+            excess = new
+            if converged:
+                break
+        else:
+            msg(f"WARNING: weighted reference mean not converged after {WEIGHTED_MAX_ITERATIONS} iterations")
+        weights = gls_weights(cov, rows, excess)
+    ref, ref_cov, cross = reference_position(p, cov, weights)
     d = p[rows] - ref
     block = cov[rows, :, rows, :] + ref_cov[None] - cross[rows] - cross[rows].transpose(0, 2, 1)
-    var0 = block[:, [0, 1], [0, 1]]
-    grow = 1.0 + np.sum(w ** 2) - 2.0 * w
+    chi2 = np.sum(d ** 2 / block[:, [0, 1], [0, 1]], axis=0)
     dof = len(rows) - 1
-
-    def chi2_at(s, a):
-        return float(np.sum(d[:, a] ** 2 / (var0[:, a] + s ** 2 * grow)))
-
-    chi2, excess = np.empty(2), np.zeros(2)
-    for a in (0, 1):
-        chi2[a] = chi2_at(0.0, a)
-        if chi2[a] > dof:
-            # chi2 falls monotonically with s; the upper bracket is the full scatter of the offsets
-            excess[a] = brentq(lambda s: chi2_at(s, a) - dof, 0.0, 10.0 * np.sqrt(np.mean(d[:, a] ** 2)) + 1e-6)
-    chi = d / np.sqrt(var0)
-    chi2_row = np.einsum('ia,iab,ib->i', d, np.linalg.inv(block), d)
-    return {'rows': rows, 'chi': chi, 'chi2_row': chi2_row, 'chi2': chi2, 'dof': dof,
-            'p_value': chi2_distribution.sf(chi2, dof), 'rms_chi': np.sqrt(chi2 / len(rows)),
-            'excess': excess, 'cov_composite': ref_cov + np.diag(excess ** 2 * np.sum(w ** 2))}
+    _, cov_composite, _ = reference_position(p, with_excess(cov, rows, excess), weights)
+    diagonal = weights[rows][:, [0, 1], [0, 1]]
+    return {'weighting': weighting, 'weights': weights, 'ref': ref, 'ref_cov': ref_cov, 'cross': cross,
+            'rows': rows, 'chi': d / np.sqrt(block[:, [0, 1], [0, 1]]),
+            'chi2_row': np.einsum('ia,iab,ib->i', d, np.linalg.inv(block), d),
+            'chi2': chi2, 'dof': dof, 'p_value': chi2_distribution.sf(chi2, dof),
+            'rms_chi': np.sqrt(chi2 / len(rows)), 'excess': excess, 'cov_composite': cov_composite,
+            'composite': np.sqrt(np.diag(cov_composite)), 'error': np.sqrt(np.diag(ref_cov)),
+            'n_eff': 1.0 / np.sum(diagonal ** 2, axis=0), 'max_weight': diagonal.max(axis=0),
+            'iterations': iterations}
 
 
 def reference_lines(ref):
@@ -635,20 +729,38 @@ def reference_lines(ref):
     if ref['fixed']:
         lines.append(f"{'  error':<40}none, taken as exact")
         return lines
-    lines.append(f"{'  error, covariance only':<40}{ref['error'][0]:.4f} (RA), {ref['error'][1]:.4f} (Dec) arcsec, "
-                 f"for a stationary source")
-    st = ref.get('stationarity')
-    if st is None:
-        lines.append(f"{'  stationarity':<40}not testable from a single row")
+    means = ref.get('means')
+    if means is None:
+        lines += [f"{'  error, covariance only':<40}{ref['error'][0]:.4f} (RA), {ref['error'][1]:.4f} (Dec) arcsec",
+                  f"{'  stationarity':<40}not testable from a single row"]
         return lines
-    lines += [f"  Stationarity of the {len(st['rows'])} reference rows, chi about the reference from the full covariance",
-              f"    {'':<36}{'RA':>10}{'Dec':>10}",
-              f"    {'chi2 / dof':<36}{st['chi2'][0]:>6.1f}/{st['dof']:<3d}{st['chi2'][1]:>6.1f}/{st['dof']:<3d}",
-              f"    {'p-value':<36}{st['p_value'][0]:>10.2g}{st['p_value'][1]:>10.2g}",
-              f"    {'rms chi (1 if stationary)':<36}{st['rms_chi'][0]:>10.2f}{st['rms_chi'][1]:>10.2f}",
-              f"    {'excess jitter for chi2/dof = 1, arcsec':<36}{st['excess'][0]:>10.4f}{st['excess'][1]:>10.4f}",
-              f"{'  error, covariance + excess':<40}{ref['composite'][0]:.4f} (RA), {ref['composite'][1]:.4f} (Dec) "
-              f"arcsec, used for the radial offsets",
+    order = [ref['weighting']] + [w for w in REFERENCE_WEIGHTINGS if w != ref['weighting']]
+    head = ''.join(f"{(w + (' (used)' if w == ref['weighting'] else '')):>26}" for w in order)
+    sub = ''.join(f"{'RA':>13}{'Dec':>13}" for _ in order)
+
+    def row(name, fmt, key):
+        return f"    {name:<38}" + ''.join(f"{means[w][key][0]:>13{fmt}}{means[w][key][1]:>13{fmt}}" for w in order)
+
+    other = order[1]
+    shift = means[other]['ref'] - means[order[0]]['ref']
+    lines += [f"  The two means of the {len(means[order[0]]['rows'])} reference rows, arcsec unless stated",
+              f"    {'':<38}{head}",
+              f"    {'':<38}{sub}",
+              row('error, covariance only', '.4f', 'error'),
+              f"    {'chi2 / dof (covariance only)':<38}" + ''.join(
+                  f"{means[w]['chi2'][0]:>9.1f}/{means[w]['dof']:<3d}{means[w]['chi2'][1]:>9.1f}/{means[w]['dof']:<3d}"
+                  for w in order),
+              row('p-value', '.2g', 'p_value'),
+              row('rms chi (1 if stationary)', '.2f', 'rms_chi'),
+              row('excess jitter for chi2/dof = 1', '.4f', 'excess'),
+              row('error, covariance + excess', '.4f', 'composite'),
+              row('effective number of rows', '.1f', 'n_eff'),
+              row('largest weight of one row', '.3f', 'max_weight'),
+              f"    {other + ' mean minus ' + order[0] + ' mean':<38}{shift[0]:>+13.4f}{shift[1]:>+13.4f}  "
+              f"({shift[0] / np.hypot(ref['composite'][0], means[other]['composite'][0]):+.1f}, "
+              f"{shift[1] / np.hypot(ref['composite'][1], means[other]['composite'][1]):+.1f} sigma, "
+              f"errors in quadrature, an upper bound as the means share rows)",
+              f"  {ref['weighting']} mean used for the radial offsets, with its covariance + excess error",
               "    the excess jitter is scatter the covariance does not explain: real motion or underestimated errors"]
     before, after = ref.get('before'), ref.get('after')
     if before and after:
@@ -674,8 +786,9 @@ def publication_lines(ref):
     """
     The reference position to quote: RA hms and Dec dms, each +/- a conservative 1-sigma error.
 
-    The error is the larger of the composite error (covariance plus excess
-    jitter) and the error from the measured jitter alone, per component. The
+    The error is the composite error (covariance plus excess jitter); for the
+    equal-weight mean, the larger of that and the error from the measured
+    equal-weight jitter alone, per component. The
     RA error is given in seconds of time and in arcsec (RA cos Dec), the Dec
     error in arcsec, and each coordinate to the decimal places of its error.
     """
@@ -685,7 +798,7 @@ def publication_lines(ref):
     if ref['fixed']:
         return head + [f"  {format_position(ref['ra_deg'], ref['dec_deg'])}, a fixed position, no error"]
     err = ref.get('composite', ref['error'])
-    if ref.get('after') is not None:
+    if ref.get('after') is not None and ref.get('weighting') == 'equal':
         err = np.maximum(err, ref['after']['error'])
     ra_s = err[0] / (15.0 * np.cos(np.radians(ref['dec_deg'])))
     n_ra, n_dec, n_ra_arcsec = error_decimals(ra_s), error_decimals(err[1]), error_decimals(err[0])
@@ -756,7 +869,7 @@ def compare_with_truth(p, cov, path, phase_centre, weights, fixed):
     chi = diff / sd
     d = diff.ravel()
     chi2 = float(d @ np.linalg.solve(cov.reshape(2 * n, 2 * n), d))
-    true_ref = fixed if fixed is not None else weights @ true_xy
+    true_ref = fixed if fixed is not None else np.einsum('iab,ib->a', weights, true_xy)
     out = {'true_xy': true_xy, 'true_radial': np.hypot(*(true_xy - true_ref).T),
            'diff': diff, 'chi': chi, 'chi2': chi2, 'dof': 2 * n,
            'rms_mas': np.sqrt(np.mean(diff ** 2, axis=0)) * 1e3, 'chi_mean': chi.mean(axis=0),
@@ -999,6 +1112,9 @@ def parse_args():
     parser.add_argument('--reference-min-snr', type=float, metavar='SNR', default=None,
                         help='rows inside --reference-rows whose measured SNR (flux / rms of the row) is below '
                              'SNR are left out of the reference (default: no cut)')
+    parser.add_argument('--reference-weighting', choices=REFERENCE_WEIGHTINGS, default=REFERENCE_WEIGHTINGS[0],
+                        help='mean of --reference-rows the radial offsets use: weighted (generalised least squares '
+                             'with the excess jitter) or equal; both are reported (default: weighted)')
     parser.add_argument('--no-systematic', action='store_true',
                         help='ignore the catalogue\'s systematic columns')
     parser.add_argument('--floor-only', action='store_true',
@@ -1064,28 +1180,41 @@ def main():
 
     ra_corr, dec_corr = tangent_plane_to_radec(p, phase_centre)
     stem = args.catalog.stem
-    weights, fixed, label = reference_spec(args, snr, phase_centre)
+    row_weights, fixed, label = reference_spec(args, snr, phase_centre)
+    weighting = args.reference_weighting
+    weights = None
+    means = None
+    if row_weights is not None:
+        rows = np.nonzero(row_weights)[0]
+        if len(rows) > 1:
+            # Both means of the reference rows; the chosen one sets the radial offsets.
+            means = {w: reference_mean(p, cov, rows, w) for w in REFERENCE_WEIGHTINGS}
+            label += f", {weighting}"
+            weights = means[weighting]['weights']
+        else:
+            weights = equal_weights(rows, len(p))
     ref, ref_cov, cross = reference_position(p, cov, weights, fixed)
     ref_ra, ref_dec = tangent_plane_to_radec(ref[None], phase_centre)
     reference = {'label': label, 'ra_deg': float(ref_ra[0]), 'dec_deg': float(ref_dec[0]),
-                 'error': np.sqrt(np.diag(ref_cov)), 'fixed': fixed is not None}
+                 'error': np.sqrt(np.diag(ref_cov)), 'fixed': fixed is not None, 'weighting': weighting}
     if weights is not None:
         # The same rows without the translations, to show what the translations do to the reference.
-        rows = np.nonzero(weights)[0]
         for key, i in (('start', rows[0]), ('end', rows[-1])):
             reference[key] = {'index': int(i), 'mjd': float(cat['time'][i].mjd), 'epoch': int(epoch[i]),
                               'date_obs': str(trans['obs_isot'][epoch[i]])}
-        raw = weights @ x
+        raw = np.einsum('iab,ib->a', weights, x)
         raw_ra, raw_dec = tangent_plane_to_radec(raw[None], phase_centre)
         reference.update(raw_ra_deg=float(raw_ra[0]), raw_dec_deg=float(raw_dec[0]), shift=ref - raw,
-                         before=reference_jitter(ra, dec, weights),
-                         after=reference_jitter(ra_corr, dec_corr, weights))
-        # Stationarity of the reference rows; their excess jitter goes into the reference error.
-        st = stationarity(p, cov, weights, ref, ref_cov, cross)
-        if st is not None:
-            reference.update(stationarity=st, xy=ref, cov_only=ref_cov, cov_composite=st['cov_composite'],
-                             composite=np.sqrt(np.diag(st['cov_composite'])))
-            ref_cov = st['cov_composite']
+                         before=reference_jitter(ra, dec, row_weights),
+                         after=reference_jitter(ra_corr, dec_corr, row_weights))
+    if means is not None:
+        # The excess jitter of the chosen mean goes into the reference error of the radial offsets.
+        chosen = means[weighting]
+        other = means[REFERENCE_WEIGHTINGS[1] if weighting == REFERENCE_WEIGHTINGS[0] else REFERENCE_WEIGHTINGS[0]]
+        reference.update(means=means, stationarity=chosen, xy=ref, cov_only=ref_cov,
+                         cov_composite=chosen['cov_composite'], composite=chosen['composite'],
+                         other_xy=other['ref'], other_weighting=other['weighting'])
+        ref_cov = chosen['cov_composite']
     # One line here; the full reference block is in the target summary.
     if reference['fixed']:
         ref_error = "taken as exact"
@@ -1095,12 +1224,13 @@ def main():
     else:
         ref_error = f"error {reference['error'][0]:.4f} (RA), {reference['error'][1]:.4f} (Dec) arcsec"
     msg(f"Reference: {label}, {ref_error}; details in the target summary")
-    if reference.get('stationarity') is not None:
-        st = reference['stationarity']
-        msg(f"Reference rows against a stationary source: chi2/dof RA {st['chi2'][0]:.1f}/{st['dof']} "
+    for w, st in (means or {}).items():
+        msg(f"Reference rows, {w} mean{' (used)' if w == weighting else ''}: chi2/dof RA {st['chi2'][0]:.1f}/{st['dof']} "
             f"(p {st['p_value'][0]:.2g}), Dec {st['chi2'][1]:.1f}/{st['dof']} (p {st['p_value'][1]:.2g}); "
             f"rms chi {st['rms_chi'][0]:.2f}, {st['rms_chi'][1]:.2f}; excess jitter {st['excess'][0]:.4f} (RA), "
-            f"{st['excess'][1]:.4f} (Dec) arcsec")
+            f"{st['excess'][1]:.4f} (Dec) arcsec; error {st['composite'][0]:.4f}, {st['composite'][1]:.4f} arcsec; "
+            f"effective rows {st['n_eff'][0]:.1f}, {st['n_eff'][1]:.1f}"
+            + (f"; {st['iterations']} iterations" if w == 'weighted' else ""))
     r, r_err = radial_offsets(p, cov, ref, ref_cov, cross)
     asymmetric = None
     if cat['systematic_sides'] is not None and not args.no_systematic:

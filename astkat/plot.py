@@ -1295,7 +1295,8 @@ def reference_figure(target):
     errors, the reference rows coloured by their chi2 about the reference (2
     dof, from the full covariance) and the rows left out of it muted, with the
     reference's 1-sigma ellipse from the covariance alone (solid) and with the
-    excess jitter (dashed). Axis limits follow the reference rows, so a few
+    excess jitter (dashed), and the other mean of the same rows (equal-weight
+    or weighted, whichever the offsets do not use) as a cross. Axis limits follow the reference rows, so a few
     poorly measured rows do not set the scale. Second: chi in RA against chi in
     Dec for the reference rows, with the circles holding 68, 95 and 99.7% of a
     2-dof chi. Third and fourth: chi in RA and Dec against time and against
@@ -1329,6 +1330,10 @@ def reference_figure(target):
                linewidths=0.5, zorder=3, label='Reference rows')
     _outline(ax, (0.0, 0.0), ref['cov_only'], MODEL_COLOUR, '-', r'Reference 1$\sigma$, covariance')
     _outline(ax, (0.0, 0.0), ref['cov_composite'], MODEL_COLOUR, '--', r'Reference 1$\sigma$, covariance + excess')
+    if 'other_xy' in ref:
+        names = {'equal': 'Equal-weight mean', 'weighted': 'Weighted mean'}
+        ax.plot(*(ref['other_xy'] - ref['xy']), 'x', color=HIGHLIGHT_COLOUR, ms=8, mew=1.5, zorder=5,
+                label=names.get(ref['other_weighting'], ref['other_weighting']))
     span = max(1.3 * np.percentile(np.abs(d[rows]), 95), 4.0 * np.max(ref['composite']), 1e-3)
     ax.set_xlim(span, -span)
     ax.set_ylim(-span, span)
