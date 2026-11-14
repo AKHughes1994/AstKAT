@@ -143,9 +143,9 @@ def create_project_config(name, deep_image, stack_image, image_dir, rms=False,
             'zargs': {'quiet': True},               # extra keyword arguments passed to bdsf.process_image
         },
         'THRESHOLDS': {
-            'flux_threshold': 0.15,                 # point-like if the median |total flux / peak flux - 1| is below this
-            'size_threshold': 0.15,                 # ... and the median |size / beam - 1| on both axes is below this
-            'single_fraction': 0.5,                 # least fraction of a source's detections with PyBDSF S_Code S
+            'flux_threshold': 0.5,                 # point-like if the median |total flux / peak flux - 1| is below this
+            'size_threshold': 0.5,                 # ... and the median |size / beam - 1| on both axes is below this
+            'single_fraction': 0.25,                 # least fraction of a source's detections with PyBDSF S_Code S
             'ambiguous_fraction': 0.1,              # most epochs (as a share of those with a match) a source may be
                                                     # ... ambiguous or blended (S_Code A); more is a blended pair
             'snr_threshold': 7.0,                   # least SNR of a deep-catalogue source; the deep sources are the
